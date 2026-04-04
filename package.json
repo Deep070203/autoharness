@@ -10,16 +10,17 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "ai": "^6.0.0",
-    "@ai-sdk/openai": "^1.0.0",
-    "@ai-sdk/anthropic": "^1.0.0",
-    "@ai-sdk/google": "^1.0.0",
-    "zod": "^3.23.0"
+    "@ai-sdk/anthropic": "latest",
+    "@ai-sdk/google": "latest",
+    "@ai-sdk/openai": "latest",
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "ai": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@types/node": "latest",
     "tsx": "^4.19.0",
-    "@types/node": "^22.0.0"
+    "typescript": "^5.7.0"
   },
   "engines": {
     "node": ">=22.0.0"

@@ -8,11 +8,11 @@ WORKDIR /app
 
 # Install dependencies
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm install --legacy-peer-deps
 
 # Copy source and compile
 COPY tsconfig.json ./
-COPY agent.ts ./
+COPY *.ts ./
 COPY src/ ./src/
 RUN npx tsc
 

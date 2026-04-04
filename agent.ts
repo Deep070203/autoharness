@@ -37,10 +37,10 @@ const SYSTEM_PROMPT = "You are an agent that executes tasks";
  *   "openai/gpt-5"
  *   "anthropic/claude-opus-4-1"
  *   "google/gemini-2.5-pro"
- *   "mistral/mistral-large-latest"
  */
-const MODEL: LanguageModel = "openai/gpt-5" as LanguageModel;
-const MODEL_NAME = "openai/gpt-5";
+import { google } from "@ai-sdk/google";
+const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+const MODEL_NAME = "google/gemini-2.5-pro";
 const MAX_TURNS = 30;
 
 /**
