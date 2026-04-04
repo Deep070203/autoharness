@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.git
+run.log
+results.tsv
+jobs/
+tasks/
+*.tsbuildinfo
+.DS_Store
