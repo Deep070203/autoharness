@@ -65,8 +65,8 @@ export class TrialOrchestrator {
         await fs.writeFile(path.join(agentLogDir, 'stderr.log'), res.stderr);
     }
 
-    async runVerification() {
-        if (!this.env) return;
+    async runVerification(): Promise<number> {
+        if (!this.env) return 0;
         console.log(`[Orchestrator] Running sandbox verification scripts...`);
 
         const verifierLogDir = path.join(this.absOutputDir, 'verifier');
@@ -77,10 +77,13 @@ export class TrialOrchestrator {
             await this.env.exec("/tests/test.sh", 120);
             await this.env.downloadDir('/verifier', verifierLogDir);
 
-            const reward = await fs.readFile(path.join(verifierLogDir, 'reward.txt'), 'utf-8');
-            console.log(`[Orchestrator] Test Passed. Reward: ${reward.trim()}`);
+            const rewardStr = await fs.readFile(path.join(verifierLogDir, 'reward.txt'), 'utf-8');
+            const reward = parseFloat(rewardStr.trim());
+            console.log(`[Orchestrator] Test Passed. Reward: ${reward}`);
+            return isNaN(reward) ? 0 : reward;
         } catch (e: any) {
             console.log(`[Orchestrator] Verification failed to parse: ${e.message}`);
+            return 0;
         }
     }
 
