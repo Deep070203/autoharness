@@ -83,6 +83,27 @@ When editing `agent.ts` you should consider specialized tools (via zod schema). 
 - parsing complicated command bounds
 - matching model priors via naming
 
+### Tool Tiers
+| Tier | Tools | Module |
+|------|-------|--------|
+| 0 - Shell | `run_shell` | Built-in |
+| 1 - Browser | `browser_navigate`, `browser_act`, `browser_extract`, `browser_observe`, `browser_get_page_text` | `src/tools/browser.ts` |
+| 2 - Terminal | `terminal_run`, `terminal_read`, `terminal_send_keys` | `src/tools/terminal.ts` |
+| 3 - MCP | Dynamically discovered from `mcp-servers.json` | `src/tools/mcp.ts` |
+| 4 - Computer | `computer_screenshot`, `computer_action`, `computer_wait` | `src/tools/computer.ts` |
+
+You can enable/disable tiers by importing or removing them from `createAgent()` in `agent.ts`.
+
+### AXI Design Principles
+When creating or modifying tools, follow these ergonomics principles:
+1. **Token Efficiency**: Use **TOON** (Token-Optimized Object Notation) instead of JSON for lists/objects.
+2. **Aggressive Truncation**: Truncate large outputs (>2000 chars) with a size hint.
+3. **Structured Errors**: Use `error: <msg>` instead of generic error blocks.
+4. **Contextual Disclosure**: Suggest the next logical command using `help[1]: ...` hints.
+5. **No Placeholders**: Never return empty output; use `status: success` or `count: 0`.
+
+Use `toTOON()` and `truncateAXI()` from `@utils/toon` to implement these.
+
 ## Rules
 1. **Never skip the gate** — every change must pass the 3-step validation mechanism through `npx tsx bin/gating.ts`.
 2. **One hypothesis per iteration** — DO NOT overcomplicate edits.

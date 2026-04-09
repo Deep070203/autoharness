@@ -4,7 +4,26 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { TrialOrchestrator } from '../src/orchestrator/trial.js';
 
+// Simple .env loader
+async function loadEnv() {
+    try {
+        const content = await fs.readFile('.env', 'utf-8');
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const [key, ...values] = trimmed.split('=');
+            const value = values.join('=').replace(/^["']|["']$/g, '');
+            process.env[key.trim()] = value;
+        }
+        console.log('[Benchmark] Loaded .env file');
+    } catch (e) {
+        // No .env file or error reading it
+    }
+}
+
+
 async function main() {
+    await loadEnv();
     const { values, positionals } = parseArgs({
         options: {
             dataset: { type: 'string', short: 'd' },

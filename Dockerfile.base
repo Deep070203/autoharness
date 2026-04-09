@@ -1,7 +1,14 @@
 FROM node:22-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates git tmux \
+    # Playwright / Chromium dependencies for browser-use (Stagehand)
+    libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
+    libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
+    libasound2 libcups2 libxkbcommon0 libgtk-3-0 \
+    fonts-liberation xdg-utils \
+    xvfb xdotool fluxbox scrot && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -10,10 +17,14 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install --legacy-peer-deps
 
+# Install Playwright Chromium for browser-use (Stagehand)
+RUN npx playwright install chromium
+
 # Copy source and compile
 COPY tsconfig.json ./
 COPY *.ts ./
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 RUN npx tsc
 
 # Ensure output directories exist

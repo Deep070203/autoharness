@@ -26,8 +26,18 @@ export class TrialOrchestrator {
         );
         this.containerId = stdout.trim();
         this.env = new DockerEnvironment(this.containerId);
-
         console.log(`[Orchestrator] Sandbox ID: ${this.containerId.slice(0, 12)}`);
+
+        // Run setup.sh if it exists
+        try {
+            const setupPath = path.join(this.absTaskDir, 'setup.sh');
+            await fs.access(setupPath);
+            console.log(`[Orchestrator] Running setup script...`);
+            await this.env.exec("bash /workspace/setup.sh", 60);
+        } catch (e) {
+            // Ignore if setup.sh doesn't exist
+        }
+
         return this.env;
     }
 
@@ -72,14 +82,20 @@ export class TrialOrchestrator {
         const verifierLogDir = path.join(this.absOutputDir, 'verifier');
         try {
             await this.env.exec("mkdir -p /verifier");
-            await this.env.exec("cp -r /workspace/tests /tests");
-            await this.env.exec("chmod +x /tests/test.sh");
+            await this.env.exec("mkdir -p /tests");
+            await this.env.exec("cp -r /workspace/tests/* /tests/", 30).catch(() => { });
+
+            // Ensure test.sh is executable
+            await this.env.exec("chmod +x /tests/test.sh", 10).catch(() => { });
+
+            console.log(`[Orchestrator] Executing /tests/test.sh...`);
             await this.env.exec("/tests/test.sh", 120);
+
             await this.env.downloadDir('/verifier', verifierLogDir);
 
             const rewardStr = await fs.readFile(path.join(verifierLogDir, 'reward.txt'), 'utf-8');
             const reward = parseFloat(rewardStr.trim());
-            console.log(`[Orchestrator] Test Passed. Reward: ${reward}`);
+            console.log(`[Orchestrator] Verification Complete. Reward: ${reward}`);
             return isNaN(reward) ? 0 : reward;
         } catch (e: any) {
             console.log(`[Orchestrator] Verification failed to parse: ${e.message}`);

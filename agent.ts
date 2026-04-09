@@ -16,6 +16,11 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
+import { initStagehand, createBrowserTools, closeStagehand } from "./src/tools/browser.js";
+import { loadMCPConfig, connectMCPServers, mergeMCPTools, closeMCPServers, type MCPClientHandle } from "./src/tools/mcp.js";
+import { createTerminalTools } from "./src/tools/terminal.js";
+import { createComputerTools } from "./src/tools/computer.js";
+import { toTOON, truncateAXI } from "./src/utils/toon.js";
 import { execSync } from "node:child_process";
 
 import type { BaseEnvironment, AgentContext, ExecResult } from "./src/harbor.js";
@@ -39,8 +44,8 @@ const SYSTEM_PROMPT = "You are an agent that executes tasks";
  *   "google/gemini-2.5-pro"
  */
 import { google } from "@ai-sdk/google";
-const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
-const MODEL_NAME = "google/gemini-2.5-pro";
+const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
+const MODEL_NAME = "google/gemini-2.5-flash";
 const MAX_TURNS = 30;
 
 /**
@@ -58,15 +63,16 @@ function createTools(environment: BaseEnvironment) {
                 try {
                     const result = await environment.exec(args.command, 120);
                     let out = "";
-                    if (result.stdout) out += result.stdout;
+                    if (result.stdout) out += truncateAXI(result.stdout, 2000);
                     if (result.stderr) {
                         out += out
-                            ? `\nSTDERR:\n${result.stderr}`
-                            : `STDERR:\n${result.stderr}`;
+                            ? `\nerror: ${truncateAXI(result.stderr, 1000)}`
+                            : `error: ${truncateAXI(result.stderr, 1000)}`;
                     }
-                    return out || "(no output)";
-                } catch (err) {
-                    return `ERROR: ${err}`;
+                    const final = out || "status: success (no output)";
+                    return final + "\nhelp[1]: Run `run_shell` with `ls` to check the filesystem if unsure.";
+                } catch (err: any) {
+                    return `error: ${err.message || err}`;
                 }
             },
         }),
@@ -76,14 +82,54 @@ function createTools(environment: BaseEnvironment) {
 /**
  * Build the agent. Modify to add more tools, sub-agents, or change config.
  */
-function createAgent(environment: BaseEnvironment) {
-    const tools = createTools(environment);
-    return new ToolLoopAgent({
-        model: MODEL,
-        instructions: SYSTEM_PROMPT,
-        tools,
-        stopWhen: stepCountIs(MAX_TURNS),
-    });
+async function createAgent(environment: BaseEnvironment) {
+    const baseTools = createTools(environment);
+
+    // Browser tools (Stagehand) — gracefully unavailable if Chromium is missing
+    let browserTools: Record<string, any> = {};
+    try {
+        const stagehand = await initStagehand();
+        browserTools = createBrowserTools(stagehand);
+        console.log(`[Agent] Browser tools enabled: ${Object.keys(browserTools).join(", ")}`);
+    } catch (e: any) {
+        console.warn(`[Agent] Browser tools unavailable: ${e.message}`);
+    }
+
+    // MCP tools (Dynamic discovery)
+    let mcpTools: Record<string, any> = {};
+    let mcpHandles: MCPClientHandle[] = [];
+    try {
+        const configs = loadMCPConfig();
+        if (configs.length > 0) {
+            mcpHandles = await connectMCPServers(configs);
+            mcpTools = mergeMCPTools(mcpHandles);
+            console.log(`[Agent] MCP tools enabled: ${Object.keys(mcpTools).join(", ")}`);
+        }
+    } catch (e: any) {
+        console.warn(`[Agent] MCP tools unavailable: ${e.message}`);
+    }
+
+    // Computer-use tools (Gracefully unavailable if DISPLAY is not set/ready)
+    let computerTools: Record<string, any> = {};
+    try {
+        computerTools = createComputerTools();
+        console.log(`[Agent] Computer tools enabled: ${Object.keys(computerTools).join(", ")}`);
+    } catch (e: any) {
+        console.warn(`[Agent] Computer tools unavailable: ${e.message}`);
+    }
+
+    // Terminal tools (Persistent sessions)
+    const terminalTools = createTerminalTools();
+
+    return {
+        agent: new ToolLoopAgent({
+            model: MODEL,
+            instructions: SYSTEM_PROMPT,
+            tools: { ...baseTools, ...browserTools, ...terminalTools, ...computerTools, ...mcpTools },
+            stopWhen: stepCountIs(MAX_TURNS),
+        }),
+        mcpHandles,
+    };
 }
 
 /**
@@ -93,10 +139,31 @@ async function runTask(
     environment: BaseEnvironment,
     instruction: string,
 ): Promise<{ result: AgentRunResult; durationMs: number }> {
-    const agent = createAgent(environment);
+    // Feature 2: Start desktop if needed
+    try {
+        await environment.exec("bash scripts/start-desktop.sh", 15);
+    } catch (e) {
+        // Silently continue if desktop fails to start
+    }
+
+    const { agent, mcpHandles } = await createAgent(environment);
     const t0 = Date.now();
-    const result = await agent.generate({ prompt: instruction });
+
+    // Feature 4: AXI - Ambient Context
+    const ambientContext = `
+## Ambient Context
+cwd: ${process.cwd().replace(process.env.HOME || "", "~")}
+bin: autoharness (agent-engineer)
+tools: ${Object.keys((agent as any).tools).join(", ")}
+`;
+
+    const result = await agent.generate({ prompt: ambientContext + "\nTASK: " + instruction });
     const durationMs = Date.now() - t0;
+
+    // Clean up resources after each task
+    await closeStagehand();
+    await closeMCPServers(mcpHandles);
+
     return { result: result as unknown as AgentRunResult, durationMs };
 }
 

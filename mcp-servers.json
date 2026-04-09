@@ -1,0 +1,11 @@
+[
+    {
+        "name": "filesystem",
+        "command": "npx",
+        "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/Users/deepshah/Downloads/Coding projects/autoharness/workspace"
+        ]
+    }
+]
