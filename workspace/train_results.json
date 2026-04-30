@@ -1,16 +1,16 @@
 {
-  "timestamp": "2026-04-09T00:49:26.461Z",
+  "timestamp": "2026-04-15T01:18:40.189Z",
   "split": "train",
   "total_tasks": 2,
-  "passed_tasks": 0,
+  "passed_tasks": 2,
   "results": {
     "acl-permissions-inheritance": {
-      "reward": 0,
-      "passed": false
+      "reward": 1,
+      "passed": true
     },
     "analyze-access-logs": {
-      "reward": 0,
-      "passed": false
+      "reward": 1,
+      "passed": true
     }
   }
 }

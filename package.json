@@ -17,7 +17,10 @@
     "@anthropic-ai/claude-agent-sdk": "latest",
     "@browserbasehq/stagehand": "^3.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@octokit/rest": "^22.0.1",
     "ai": "latest",
+    "dotenv": "^17.4.2",
+    "simple-git": "^3.36.0",
     "zod": "latest"
   },
   "devDependencies": {
