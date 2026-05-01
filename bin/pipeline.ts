@@ -69,8 +69,8 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string)
 async function main() {
     const github = new GitHubService();
 
-    const targetOwner = "exo-explore";
-    const targetRepo = "exo";
+    const targetOwner = "Deep070203";
+    const targetRepo = "autoharness";
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`  OSS Contributor Pipeline: ${targetOwner}/${targetRepo}`);
