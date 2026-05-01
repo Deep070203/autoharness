@@ -1,25 +1,74 @@
 # AutoHarness
 
-Autonomous agent harness engineering — in TypeScript.
+Autonomous OSS contributor pipeline + agent harness engineering — in TypeScript.
 
-Give an AI agent a task, let it build and iterate on an agent harness autonomously overnight. It modifies the system prompt, tools, agent configuration, and orchestration, runs the benchmark, checks the score, keeps or discards the change, and repeats.
+A **13-stage pipeline** that sources bug-fix candidates from open-source repositories, analyzes merged PRs for fix patterns, deploys a **tool-calling coding agent** that writes real fixes in cloned repos, and submits pull requests — with a human gate before anything goes public.
 
-**LLM-agnostic** via the [Vercel AI SDK](https://sdk.vercel.ai). Switch providers by changing one config string — no code changes needed.
+**LLM-agnostic** via the [Vercel AI SDK](https://sdk.vercel.ai). Switch providers by changing one config string.
 
-## How it works
+## OSS Contributor Pipeline
 
-The repo has a few files and directories that matter:
+The pipeline automates the full lifecycle of an open-source contribution:
 
-- **`agent.ts`** — the entire harness under test in a single file. It contains config, tool definitions, agent construction, and orchestration logic. The adapter section is explicitly marked as fixed; the rest is the primary edit surface for the meta-agent.
-- **`program.md`** — instructions for the meta-agent + the directive (what kind of agent to build). This file is edited by the human.
-- **`tasks/`** — evaluation tasks in [Harbor](https://github.com/harbor-framework/harbor) format.
-- **`.agent/`** — optional workspace artifacts for reusable instructions, notes, or skills.
+```
+Stage 1-2   Sourcing & Filtering      ← Fetch recent merged PRs, filter for bug fixes
+Stage 3     Ouroboros Interview        ← LLM viability gate (KEEP / DROP)
+Stage 4     Deduplication              ← Check for existing similar issues/PRs
+Stage 5     Real Analysis              ← Fetch PR diff via GitHub API, deep LLM analysis
+Stage 8     Merge-Pattern Matching     ← Extract repo's PR style from last 10 merged PRs
+    ↓
+          Code Fix Agent               ← Tool-calling agent writes actual code fixes
+    ↓
+Stage 9-10  PR Drafting                ← Generate title/body from real code changes
+Stage 11-12 Human Review Gate          ← CLI prompt: review diff, approve CLA
+Stage 13    Submission                 ← Git push + PR creation via GitHub API
+```
 
-The metric is total score produced by the benchmark's task test suites. The meta-agent hill-climbs on this score.
+### The Code Fix Agent
 
-## Quick start
+The core of the pipeline. A `ToolLoopAgent` that operates inside the cloned fork with 6 tools:
 
-Requirements: Docker, Node.js 22+, [uv](https://docs.astral.sh/uv/) (for Harbor CLI), and API keys for your chosen provider.
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read any file in the repo |
+| `write_file` | Create or overwrite files |
+| `patch_file` | Surgical search-and-replace edits (preferred for existing files) |
+| `run_shell` | Execute commands — tests, build, grep |
+| `list_directory` | Navigate the project structure |
+| `search_codebase` | Grep across the repo for patterns |
+
+The agent's system prompt is built on patterns from production coding agents:
+- **Self-awareness guardrails** — explicitly warns the LLM about common failure modes (claiming correctness without running code)
+- **Mandatory verification** — every edit must be followed by running tests/build/command
+- **No-narration rule** — cuts output token waste by ~30%
+- **Security rails** — OWASP top 10 awareness to avoid introducing vulnerabilities
+- **Post-fix self-review** — agent reviews its own diff and strips unnecessary complexity
+
+### Running the Pipeline
+
+```bash
+# Run the full pipeline against a target repo
+npx tsx bin/pipeline.ts
+```
+
+The target repo is configured in `bin/pipeline.ts` (default: `exo-explore/exo`). The pipeline will:
+1. Fetch and filter recent merged PRs
+2. Run each through viability interview + deduplication
+3. Analyze the PR diff and find similar fix patterns
+4. Deploy the coding agent to write a real fix
+5. Draft the PR and pause for human approval
+6. Submit on approval
+
+## Quick Start
+
+### Requirements
+
+- Node.js 22+
+- GitHub personal access token (for API + push)
+- Google AI API key (for LLM stages)
+- Docker (optional, for sandboxed meta-agent harness)
+
+### Setup
 
 ```bash
 # 1. Install dependencies
@@ -27,115 +76,103 @@ npm install
 
 # 2. Set up environment variables
 cat > .env << 'EOF'
-OPENAI_API_KEY=...
-# Optional: add keys for other providers
-# ANTHROPIC_API_KEY=...
-# GOOGLE_GENERATIVE_AI_API_KEY=...
+GITHUB_TOKEN=ghp_...
+GOOGLE_GENERATIVE_AI_API_KEY=...
 EOF
 
-# 3. Build base image
+# 3. Run the OSS pipeline
+npx tsx bin/pipeline.ts
+```
+
+## Project Structure
+
+```
+bin/
+  pipeline.ts               -- 13-stage OSS contributor pipeline orchestrator
+
+src/orchestrator/
+  reproduce.ts              -- Stage 5: real PR diff analysis via GitHub API
+  interview.ts              -- Stage 3: Ouroboros viability interview (LLM gate)
+  deduplicate.ts            -- Stage 4: duplicate detection via GitHub search
+  style.ts                  -- Stage 8: merge-pattern extraction from recent PRs
+  codefix.ts                -- Code Fix Agent: tool-calling LLM with 6 tools
+  drafting.ts               -- Stage 9-10: PR title/body from real code changes
+  submit.ts                 -- Stage 13: git push + PR creation
+  state.ts                  -- Pipeline state types and GitHub issue tracker
+
+src/utils/
+  github.ts                 -- GitHub service (Octokit + simple-git)
+                               getPRDiff, getPRFiles, getDefaultBranch,
+                               forkRepository, cloneRepository, etc.
+
+agent.ts                    -- Meta-agent harness (Harbor benchmark runner)
+program.md                  -- Meta-agent instructions + directive
+Dockerfile.base             -- Base image (Node 22)
+tasks/                      -- Benchmark tasks (Harbor format)
+```
+
+## Meta-Agent Harness
+
+The repo also includes a **meta-agent loop** for benchmark-driven harness engineering:
+
+- **`agent.ts`** — the harness under test. Contains config, tool definitions, agent construction, and orchestration. The adapter section is fixed; the rest is the edit surface.
+- **`program.md`** — instructions for the meta-agent directing what kind of agent to build.
+- **`tasks/`** — evaluation tasks in [Harbor](https://github.com/harbor-framework/harbor) format.
+
+The meta-agent hill-climbs on benchmark scores by modifying `agent.ts`.
+
+```bash
+# Build base image
 docker build -f Dockerfile.base -t autoharness-base .
 
-# 4. Add tasks to tasks/ (see Task format below)
-
-# 5. Run all tasks
+# Run all tasks
 rm -rf jobs; mkdir -p jobs && \
   uv run harbor run -p tasks/ -n 100 \
   --agent-import-path agent:AutoAgent \
   -o jobs --job-name latest > run.log 2>&1
 ```
 
-## Switching models
+## Switching Models
 
-Change the `MODEL` constant in `agent.ts`:
+Change the `MODEL` constant in `agent.ts` or the orchestrator files:
 
 ```typescript
-// OpenAI
-const MODEL = "openai/gpt-5";
+import { google } from "@ai-sdk/google";
+const MODEL = google("gemini-2.5-flash");
 
-// Anthropic
-const MODEL = "anthropic/claude-opus-4-1";
-
-// Google
-const MODEL = "google/gemini-2.5-pro";
-
-// Mistral
-const MODEL = "mistral/mistral-large-latest";
+// Or use other providers:
+// import { anthropic } from "@ai-sdk/anthropic";
+// const MODEL = anthropic("claude-sonnet-4-20250514");
 ```
 
-Install additional provider packages as needed:
-```bash
-npm install @ai-sdk/mistral @ai-sdk/groq @ai-sdk/deepseek
-```
-
-## Running the meta-agent
-
-Point your coding agent at the repo and prompt:
-
-```
-Read program.md and let's kick off a new experiment!
-```
-
-The meta-agent will read the directive, inspect the current harness, run the benchmark, diagnose failures, modify `agent.ts`, and iterate.
-
-## Project structure
-
-```
-agent.ts              -- single-file harness under test
-  editable section    -- prompt, tools, agent config, orchestration
-  fixed adapter       -- Harbor integration + ATIF trajectory serialization
-src/
-  harbor.ts           -- Harbor BaseEnvironment/AgentContext interfaces
-  atif.ts             -- ATIF v1.6 trajectory serializer
-program.md            -- meta-agent instructions + directive
-Dockerfile.base       -- base image (Node 22)
-.agent/               -- optional agent workspace artifacts
-tasks/                -- benchmark tasks (Harbor format)
-jobs/                 -- Harbor job outputs
-results.tsv           -- experiment log (created by meta-agent, gitignored)
-run.log               -- latest run output
-```
-
-## Task format
-
-Add tasks to `tasks/` following [Harbor's task format](https://harborframework.com/docs/tasks):
-
-```
-tasks/my-task/
-  task.toml             -- config (timeouts, metadata)
-  instruction.md        -- prompt sent to the agent
-  tests/
-    test.sh             -- entry point, writes /logs/reward.txt
-    test.py             -- verification (deterministic or LLM-as-judge)
-  environment/
-    Dockerfile          -- task container (FROM autoharness-base)
-    files/              -- reference files mounted into container
-```
-
-Tests write a score (0.0–1.0) to the verifier logs. The meta-agent hill-climbs on this.
-
-## Design choices
+## Design Choices
 
 - **LLM-agnostic.** Single harness supports 25+ providers via Vercel AI SDK.
-- **Program the meta-agent, not the harness directly.** The human steers the loop through `program.md`, while the meta-agent edits `agent.ts`.
-- **Single-file, tool-driven harness.** The implementation lives in one file for simplicity, but tool definitions stay structured so the harness can evolve cleanly.
-- **Docker isolation.** The agent runs in a container. It can't damage the host.
-- **Score-driven.** Every experiment produces a numeric score. Keep if better, discard if not.
-- **Harbor-compatible tasks.** Tasks use the same format as Harbor benchmarks.
+- **Real code, not mocks.** The pipeline fetches actual diffs, writes actual fixes, and pushes actual PRs.
+- **Human-in-the-loop.** Nothing goes to GitHub without explicit human approval at Stage 11-12.
+- **Tool-calling agent.** The code fix agent uses a proven agentic loop (read → search → patch → test → verify) instead of single-shot generation.
+- **Token-efficient prompts.** System prompts are compressed using patterns from production coding agents — tight tool descriptions, no narration, capped context windows.
+- **GitHub Issue as state.** Pipeline progress is tracked via issue checkboxes, surviving session restarts.
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `ai` | Vercel AI SDK — model abstraction + tool loop |
+| `@ai-sdk/google` | Google Gemini provider |
+| `@octokit/rest` | GitHub API client |
+| `simple-git` | Git operations (clone, branch, push) |
+| `zod` | Tool input schema validation |
+| `dotenv` | Environment variable loading |
 
 ## Cleanup
 
-Docker images and containers accumulate across runs. Clean up regularly:
-
 ```bash
-# Harbor's cached task images + task cache
-uv run harbor cache clean -f
-
-# Full Docker nuke
+# Docker cleanup
 docker system prune -a -f
 
-# Lighter: just dead containers
-docker container prune -f
+# Remove cloned repos
+rm -rf workspace/repos/*
 ```
 
 ## License
