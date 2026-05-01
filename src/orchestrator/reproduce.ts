@@ -4,7 +4,7 @@ import { google } from "@ai-sdk/google";
 import * as path from "path";
 import * as fs from "fs";
 
-const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
 
 /**
  * Structured result from Stage 5 analysis.

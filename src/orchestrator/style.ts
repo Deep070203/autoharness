@@ -2,7 +2,7 @@ import { GitHubService } from "../utils/github.js";
 import { generateText, LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
 
-const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
 
 /**
  * Handles Stage 8: Merge-Pattern Matching.

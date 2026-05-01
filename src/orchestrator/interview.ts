@@ -3,7 +3,7 @@ import { google } from "@ai-sdk/google";
 import { IssueState, PipelineStage } from "./state.js";
 import { GitHubService } from "../utils/github.js";
 
-const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
 
 /**
  * Handles the "Ouroboros Interview" step.

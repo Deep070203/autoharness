@@ -6,7 +6,7 @@ import * as path from "path";
 import { execSync } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 
-const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
 
 export interface CodeFixResult {
     success: boolean;
