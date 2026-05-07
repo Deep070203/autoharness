@@ -23,9 +23,6 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string)
     console.log(`\n--- Stage 1: Candidate Sourcing for ${owner}/${repo} ---`);
 
     try {
-        const prs = await github.getRecentMergedPRs(owner, repo, 20);
-        console.log(`Fetched ${prs.length} recently merged PRs.`);
-
         const contributing = await github.getContributingGuidelines(owner, repo);
         if (contributing) {
             console.log(`Fetched CONTRIBUTING.md (${contributing.length} chars).`);
@@ -36,28 +33,11 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string)
         // ── Stage 2: Filtering ───────────────────────────────────────────
         console.log(`\n--- Stage 2: Filtering ---`);
 
-        // Enrich candidates with pull_number and metadata
-        const candidates: Candidate[] = prs.map((pr: any) => ({
-            number: pr.number,
-            pull_number: pr.number, // For search results, number IS the pull number
-            title: pr.title,
-            body: pr.body || "",
-            url: pr.html_url,
-            author: pr.user?.login || 'unknown',
-            labels: pr.labels?.map((l: any) => l.name) || [],
-        }));
-
+        const candidates: Candidate[] = [];
         console.log(`Initial Candidates: ${candidates.length}`);
 
-        // Filter: keep only PRs that look like bug fixes
-        const filtered = candidates.filter(c => {
-            const text = (c.title + ' ' + c.body).toLowerCase();
-            return text.includes('fix') || text.includes('bug') || text.includes('patch')
-                || text.includes('resolve') || text.includes('hotfix');
-        });
-
-        console.log(`After fix/bug filter: ${filtered.length}`);
-        return filtered;
+        console.log(`After fix/bug filter: ${candidates.length}`);
+        return candidates;
 
     } catch (e: any) {
         console.error(`Failed during Stage 1/2:`, e.message);
