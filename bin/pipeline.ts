@@ -64,29 +64,11 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string,
         console.log(`\n--- Stage 2: Filtering ---`);
 
         // Build candidates from merged PRs
-        const prCandidates: Candidate[] = prs.map((pr: any) => ({
-            number: pr.number,
-            pull_number: pr.number,
-            title: pr.title,
-            body: pr.body || "",
-            url: pr.html_url,
-            author: pr.user?.login || 'unknown',
-            labels: pr.labels?.map((l: any) => l.name) || [],
-            sourceType: 'pr' as const,
-        }));
+        const prCandidates: Candidate[] = []
 
         // Filter: keep only PRs that look like bug fixes
-        const filteredPRs = prCandidates.filter(c => {
-            const text = (c.title + ' ' + c.body).toLowerCase();
-            return text.includes('fix') || text.includes('bug') || text.includes('patch')
-                || text.includes('resolve') || text.includes('hotfix');
-        });
-
-        console.log(`PR Candidates: ${prCandidates.length} total, ${filteredPRs.length} after fix/bug filter`);
-
-        if (filteredPRs.length > 0) {
-            return filteredPRs;
-        }
+        console.log(`PR Candidates: ${prCandidates.length}`);
+        // return prCandidates;
 
         // ── Fallback: source from open issues ────────────────────────────
         console.log(`\nNo merged PR candidates. Falling back to open issues...`);
