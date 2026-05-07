@@ -50,6 +50,32 @@ export class GitHubService {
     }
 
     /**
+     * Gets open issues that look like bug reports
+     */
+    async getOpenBugIssues(owner: string, repo: string, limit: number = 20) {
+        const response = await this.octokit.search.issuesAndPullRequests({
+            q: `repo:${owner}/${repo} is:issue is:open`,
+            sort: "updated",
+            order: "desc",
+            per_page: limit,
+        });
+        // Filter out pull requests (GitHub search returns both)
+        return response.data.items.filter((item: any) => !item.pull_request);
+    }
+
+    /**
+     * Gets a specific issue by its number
+     */
+    async getIssue(owner: string, repo: string, issueNumber: number) {
+        const response = await this.octokit.issues.get({
+            owner,
+            repo,
+            issue_number: issueNumber,
+        });
+        return response.data;
+    }
+
+    /**
      * Forks a repository and returns the fork details
      */
     async forkRepository(owner: string, repo: string) {

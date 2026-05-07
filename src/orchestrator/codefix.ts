@@ -1,12 +1,15 @@
 import { ToolLoopAgent, tool, stepCountIs, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
+import { anthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 
-const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+// const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+// Note: Using claude-3-5-sonnet-latest as the model name since "claude-sonnet-4.6" is not a valid API identifier
+const MODEL: LanguageModel = anthropic("claude-haiku-4-5-20251001") as unknown as LanguageModel;
 
 export interface CodeFixResult {
     success: boolean;

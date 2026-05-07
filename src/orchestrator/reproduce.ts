@@ -164,3 +164,102 @@ End with exactly: VIABLE: YES or VIABLE: NO
         return emptyResult;
     }
 }
+
+/**
+ * Issue-based analysis (no diff available).
+ * Clones the repo, reads the issue body, and uses LLM to analyze what needs fixing.
+ */
+export async function analyzeIssueLocally(
+    issue: { number: number; title: string; body: string; url: string },
+    github: GitHubService,
+    owner: string,
+    repo: string
+): Promise<ReproductionResult> {
+    console.log(`\n🛠️  Stage 5 (Issue Mode): Analyzing issue #${issue.number}: ${issue.title}`);
+
+    const emptyResult: ReproductionResult = {
+        viable: false, diff: '', analysis: '', affectedFiles: [],
+        repoPath: '', localDirName: '', prNumber: issue.number, fixSummary: '',
+    };
+
+    try {
+        // ── 1. Fork & Clone ──────────────────────────────────────────────
+        console.log(`[Issue] Forking & cloning ${owner}/${repo}...`);
+        let forkUrl = `https://github.com/${owner}/${repo}.git`;
+        let localDirName = repo;
+
+        if (process.env.GITHUB_TOKEN && process.env.GITHUB_TOKEN !== 'placeholder_needs_token') {
+            try {
+                const forkData = await github.forkRepository(owner, repo);
+                forkUrl = forkData.clone_url;
+                localDirName = forkData.name;
+                console.log(`[Issue] Fork ready: ${forkUrl}`);
+            } catch (e: any) {
+                console.log(`[Issue] Fork exists or failed, using direct clone: ${e.message}`);
+            }
+        }
+
+        await github.cloneRepository(forkUrl, localDirName);
+        const repoPath = path.resolve(`./workspace/repos/${localDirName}`);
+
+        if (!fs.existsSync(repoPath)) {
+            console.error(`[Issue] Clone failed — directory not found: ${repoPath}`);
+            return emptyResult;
+        }
+        console.log(`[Issue] Repo available at ${repoPath}`);
+
+        // ── 2. LLM analysis of the issue ────────────────────────────────
+        console.log(`[Issue] Analyzing issue with LLM...`);
+        const analysisPrompt = `
+You are a senior software engineer analyzing an open GitHub issue.
+
+### Issue #${issue.number}: ${issue.title}
+### Issue Body:
+${issue.body || 'No description.'}
+
+### Repository: ${owner}/${repo}
+
+Analyze this issue and answer:
+1. **Bug Category**: What category of bug is this? (e.g., parsing error, null check, config mistake, typo, security, race condition, wrong API usage, missing feature)
+2. **Root Cause Hypothesis**: What is likely the root cause based on the description?
+3. **Fix Approach**: How should this be fixed? Be specific about which files/modules to look at.
+4. **Viability**: Is this a clear, scoped issue suitable for an automated agent to fix? Answer YES or NO.
+5. **Risk Level**: LOW / MEDIUM / HIGH
+
+End with exactly: VIABLE: YES or VIABLE: NO
+`;
+
+        try {
+            const { text } = await generateText({
+                model: MODEL,
+                prompt: analysisPrompt,
+                system: "You are a code analysis engine. Be precise, technical, and conservative. Only mark as VIABLE if the issue is clear, scoped, and fixable.",
+            });
+
+            console.log(`[Issue] LLM Analysis:\n${text}`);
+
+            const viable = text.includes('VIABLE: YES');
+            const fixSummaryMatch = text.match(/Fix Approach[:\s]*([\s\S]*?)(?=\n\d|\n\*\*|Viability|$)/i);
+            const fixSummary = fixSummaryMatch ? fixSummaryMatch[1].trim() : issue.title;
+
+            return {
+                viable,
+                diff: `Issue #${issue.number}: ${issue.title}\n\n${issue.body || ''}`,
+                analysis: text,
+                affectedFiles: [],
+                repoPath,
+                localDirName,
+                prNumber: issue.number,
+                fixSummary,
+            };
+
+        } catch (e: any) {
+            console.error(`[Issue] LLM analysis failed: ${e.message}`);
+            return emptyResult;
+        }
+
+    } catch (e: any) {
+        console.error(`[Issue] Critical error: ${e.message}`);
+        return emptyResult;
+    }
+}

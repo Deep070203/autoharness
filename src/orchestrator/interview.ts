@@ -25,8 +25,8 @@ export async function runOuroborosInterview(
 You are an expert open-source maintainer acting as an initial viability filter.
 Your goal is to decide if a given bug fix or patch is appropriate for an AI agent to build a variation of, or learn from.
 
-We only want to pursue candidates that resolve clear, reproducible bugs or security issues.
-We DO NOT want features, sprawling refactors, UI tweaks, or changes that conflict with project philosophy.
+We only want to pursue candidates that resolve clear, reproducible bugs or security issues or project analysis work.
+We can also have features, sprawling refactors, UI tweaks, or changes but they should not be in conflict with project philosophy.
 
 ### Candidate PR:
 Title: ${candidate.title}
