@@ -4,7 +4,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 import * as dotenv from "dotenv";
 dotenv.config();
@@ -305,24 +305,19 @@ ${styleGuide.substring(0, 800)}`;
 5. Exit when done.`;
 
     try {
-        // Prepare temporary prompt file inside the repository
-        const tempPromptPath = path.join(reproResult.repoPath, ".agy_prompt.txt");
-        fs.writeFileSync(tempPromptPath, prompt, "utf-8");
-
         // Locate agy executable
         const agyPath = process.env.AGY_PATH || "/Users/deepshah/.local/bin/agy";
-        console.log(`[Agy] Running command: ${agyPath} --dangerously-skip-permissions --print-timeout 10m --print < .agy_prompt.txt`);
+        console.log(`[Agy] Running command: ${agyPath} --dangerously-skip-permissions --print-timeout 10m --print <prompt>`);
 
-        execSync(`${agyPath} --dangerously-skip-permissions --print-timeout 10m --print < .agy_prompt.txt`, {
+        execFileSync(agyPath, [
+            "--dangerously-skip-permissions",
+            "--print-timeout", "10m",
+            "--print", prompt
+        ], {
             cwd: reproResult.repoPath,
             stdio: "inherit",
             timeout: 600_000,
         });
-
-        // Clean up the temporary prompt file
-        if (fs.existsSync(tempPromptPath)) {
-            fs.unlinkSync(tempPromptPath);
-        }
 
         // Get modified files via git status
         const gitStatusOut = execSync("git status --porcelain", {

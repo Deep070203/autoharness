@@ -136,8 +136,8 @@ async function main() {
 
     const github = new GitHubService();
 
-    const targetOwner = "temporalio";
-    const targetRepo = "temporal";
+    const targetOwner = "prowler-cloud";
+    const targetRepo = "prowler";
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`  OSS Contributor Pipeline: ${targetOwner}/${targetRepo}`);
@@ -165,7 +165,9 @@ async function main() {
     // ── Stage 4: Deduplication ───────────────────────────────────────────
     const uniqueCandidates: Candidate[] = [];
     for (const candidate of viableCandidates) {
-        const isUnique = await deduplicateCandidate(candidate, github, targetOwner, targetRepo);
+        const isUnique = targetIssueNumber === candidate.number
+            ? true
+            : await deduplicateCandidate(candidate, github, targetOwner, targetRepo);
         if (isUnique) uniqueCandidates.push(candidate);
     }
 
