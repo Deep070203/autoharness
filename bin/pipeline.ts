@@ -109,7 +109,9 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string,
 async function main() {
     const { values } = parseArgs({
         options: {
-            issue: { type: 'string', short: 'i' }
+            issue: { type: 'string', short: 'i' },
+            "similar-pr": { type: 'string', short: 'p' },
+            "similar-issue": { type: 'string', short: 's' }
         },
         allowPositionals: true
     });
@@ -120,10 +122,22 @@ async function main() {
         process.exit(1);
     }
 
+    const similarPrNumber = values["similar-pr"] ? parseInt(values["similar-pr"], 10) : undefined;
+    if (similarPrNumber && isNaN(similarPrNumber)) {
+        console.error(`Invalid similar PR number provided: ${values["similar-pr"]}`);
+        process.exit(1);
+    }
+
+    const similarIssueNumber = values["similar-issue"] ? parseInt(values["similar-issue"], 10) : undefined;
+    if (similarIssueNumber && isNaN(similarIssueNumber)) {
+        console.error(`Invalid similar issue number provided: ${values["similar-issue"]}`);
+        process.exit(1);
+    }
+
     const github = new GitHubService();
 
-    const targetOwner = "Deep070203";
-    const targetRepo = "autoharness";
+    const targetOwner = "temporalio";
+    const targetRepo = "temporal";
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`  OSS Contributor Pipeline: ${targetOwner}/${targetRepo}`);
@@ -189,12 +203,40 @@ async function main() {
 
     console.log(`\n--- Stage 5 Complete: Advancing '${bestCandidate.title}' (source: ${bestCandidate.sourceType}) ---`);
 
+    // ── Fetch Guidance Context (if similar PR or Issue number is specified) ──
+    let guidanceContext = "";
+    if (similarPrNumber) {
+        console.log(`Fetching guidance context from similar PR #${similarPrNumber}...`);
+        try {
+            const prDetails = await github.getPRDetails(targetOwner, targetRepo, similarPrNumber);
+            const prDiff = await github.getPRDiff(targetOwner, targetRepo, similarPrNumber);
+            guidanceContext += `\n### Similar Reference PR #${similarPrNumber}\n`;
+            guidanceContext += `Title: ${prDetails.title}\n`;
+            guidanceContext += `Description:\n${prDetails.body}\n`;
+            guidanceContext += `\nUnified Diff:\n\`\`\`diff\n${prDiff.substring(0, 8000)}\n\`\`\`\n`;
+        } catch (e: any) {
+            console.error(`Failed to fetch similar PR #${similarPrNumber}: ${e.message}`);
+        }
+    }
+
+    if (similarIssueNumber) {
+        console.log(`Fetching guidance context from similar Issue #${similarIssueNumber}...`);
+        try {
+            const issueDetails = await github.getIssue(targetOwner, targetRepo, similarIssueNumber);
+            guidanceContext += `\n### Similar Reference Issue #${similarIssueNumber}\n`;
+            guidanceContext += `Title: ${issueDetails.title}\n`;
+            guidanceContext += `Description:\n${issueDetails.body || "No description."}\n`;
+        } catch (e: any) {
+            console.error(`Failed to fetch similar Issue #${similarIssueNumber}: ${e.message}`);
+        }
+    }
+
     // ── Stage 8: Merge-Pattern Matching ──────────────────────────────────
     const repoStyleGuide = await extractMergePatterns(github, targetOwner, targetRepo);
     console.log(`\n--- Stage 8 Complete ---`);
 
     // ── Code Fix Agent (the real work) ──────────────────────────────────
-    const codeFix: CodeFixResult = await runCodeFixAgent(bestResult, contributingMd, repoStyleGuide);
+    const codeFix: CodeFixResult = await runCodeFixAgent(bestResult, contributingMd, repoStyleGuide, guidanceContext);
 
     if (!codeFix.success) {
         console.log(`\n⚠️  Code Fix Agent did not produce a fix. Exiting.`);

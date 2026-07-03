@@ -4,7 +4,7 @@ import { GitHubService } from "../utils/github.js";
 import type { CodeFixResult } from "./codefix.js";
 import * as readline from "readline";
 
-const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
 
 /**
  * Stages 9 & 10: Drafting the Issue/PR and Polishing.

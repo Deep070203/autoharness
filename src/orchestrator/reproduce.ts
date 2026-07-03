@@ -4,7 +4,7 @@ import { google } from "@ai-sdk/google";
 import * as path from "path";
 import * as fs from "fs";
 
-const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
 
 /**
  * Structured result from Stage 5 analysis.
@@ -69,7 +69,7 @@ export async function reproduceCandidateLocally(
         }
 
         await github.cloneRepository(forkUrl, localDirName);
-        const repoPath = path.resolve(`./workspace/repos/${localDirName}`);
+        const repoPath = path.join(github.baseDir, localDirName);
 
         if (!fs.existsSync(repoPath)) {
             console.error(`[Analyze] Clone failed — directory not found: ${repoPath}`);
@@ -200,7 +200,7 @@ export async function analyzeIssueLocally(
         }
 
         await github.cloneRepository(forkUrl, localDirName);
-        const repoPath = path.resolve(`./workspace/repos/${localDirName}`);
+        const repoPath = path.join(github.baseDir, localDirName);
 
         if (!fs.existsSync(repoPath)) {
             console.error(`[Issue] Clone failed — directory not found: ${repoPath}`);

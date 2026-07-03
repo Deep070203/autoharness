@@ -19,7 +19,7 @@ export async function submitPullRequest(
 ): Promise<string | null> {
     console.log(`\n🚀 Stage 13: Submission to ${owner}/${repo}`);
 
-    const repoPath = path.resolve(`./workspace/repos/${localDirName}`);
+    const repoPath = path.join(github.baseDir, localDirName);
 
     try {
         // @ts-ignore

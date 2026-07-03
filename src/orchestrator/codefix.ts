@@ -6,10 +6,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
+import * as dotenv from "dotenv";
+dotenv.config();
 
-// const MODEL: LanguageModel = google("gemini-2.5-pro") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
 // Note: Using claude-3-5-sonnet-latest as the model name since "claude-sonnet-4.6" is not a valid API identifier
-const MODEL: LanguageModel = anthropic("claude-haiku-4-5-20251001") as unknown as LanguageModel;
+// const MODEL: LanguageModel = anthropic("claude-haiku-4-5-20251001") as unknown as LanguageModel;
 
 export interface CodeFixResult {
     success: boolean;
@@ -150,7 +152,12 @@ export async function runCodeFixAgent(
     reproResult: ReproductionResult,
     contributingMd: string | null,
     styleGuide: string,
+    guidanceContext?: string,
 ): Promise<CodeFixResult> {
+    if (process.env.USE_AGY === "true") {
+        return runCodeFixAgentWithAgy(reproResult, contributingMd, styleGuide, guidanceContext);
+    }
+
     console.log(`\n🔧 Code Fix Agent: Working on ${reproResult.repoPath}`);
     modifiedFilesSet.clear();
 
@@ -204,7 +211,7 @@ CONFIDENCE: [LOW|MEDIUM|HIGH]
 TEST_RESULT: [PASS|FAIL|NO_TESTS|SKIPPED]`;
 
     // ── User prompt: compressed context ──────────────────────────────
-    const userPrompt = `### PR Analysis
+    let userPrompt = `### PR Analysis
 ${reproResult.analysis.substring(0, 3000)}
 
 ### PR Diff (first 6000 chars)
@@ -213,9 +220,13 @@ ${reproResult.diff.substring(0, 6000)}
 \`\`\`
 
 ### Changed Files
-${reproResult.affectedFiles.map(f => `- ${f.filename} (${f.status})`).join('\n')}
+${reproResult.affectedFiles.map(f => `- ${f.filename} (${f.status})`).join('\n')}`;
 
-### Contributing Guidelines
+    if (guidanceContext) {
+        userPrompt += `\n\n### Additional Guidance / Similar Reference\n${guidanceContext}`;
+    }
+
+    userPrompt += `\n\n### Contributing Guidelines
 ${contributingMd?.substring(0, 1000) || 'None.'}
 
 ### Style Guide
@@ -255,5 +266,112 @@ Start by listing the root directory, then search for patterns related to the fix
     } catch (e: any) {
         console.error(`[CodeFix] Failed: ${e.message}`);
         return emptyResult;
+    }
+}
+
+async function runCodeFixAgentWithAgy(
+    reproResult: ReproductionResult,
+    contributingMd: string | null,
+    styleGuide: string,
+    guidanceContext?: string,
+): Promise<CodeFixResult> {
+    console.log(`\n🔧 Code Fix Agent (using agy CLI): Working on ${reproResult.repoPath}`);
+
+    let prompt = `You are tasked with fixing a bug in this repository.
+
+### PR Analysis:
+${reproResult.analysis.substring(0, 3000)}
+
+### Original PR Diff (first 6000 chars):
+\`\`\`diff
+${reproResult.diff.substring(0, 6000)}
+\`\`\`
+
+### Affected Files in Original PR:
+${reproResult.affectedFiles.map(f => `- ${f.filename} (${f.status})`).join('\n')}
+
+### Style Guide:
+${styleGuide.substring(0, 800)}`;
+
+    if (guidanceContext) {
+        prompt += `\n\n### Additional Guidance / Similar Reference:\n${guidanceContext}`;
+    }
+
+    prompt += `\n\nInstructions:
+1. Study the fix pattern in the diff and analysis above (and any additional reference guidance provided).
+2. Find similar unfixed occurrences of this pattern, or solve the bug in the current repository.
+3. Modify the files appropriately.
+4. Run tests or compiler steps to verify your fix.
+5. Exit when done.`;
+
+    try {
+        // Prepare temporary prompt file inside the repository
+        const tempPromptPath = path.join(reproResult.repoPath, ".agy_prompt.txt");
+        fs.writeFileSync(tempPromptPath, prompt, "utf-8");
+
+        // Locate agy executable
+        const agyPath = process.env.AGY_PATH || "/Users/deepshah/.local/bin/agy";
+        console.log(`[Agy] Running command: ${agyPath} --dangerously-skip-permissions --print-timeout 10m --print < .agy_prompt.txt`);
+
+        execSync(`${agyPath} --dangerously-skip-permissions --print-timeout 10m --print < .agy_prompt.txt`, {
+            cwd: reproResult.repoPath,
+            stdio: "inherit",
+            timeout: 600_000,
+        });
+
+        // Clean up the temporary prompt file
+        if (fs.existsSync(tempPromptPath)) {
+            fs.unlinkSync(tempPromptPath);
+        }
+
+        // Get modified files via git status
+        const gitStatusOut = execSync("git status --porcelain", {
+            cwd: reproResult.repoPath,
+            encoding: "utf-8",
+        });
+
+        const modifiedFiles: string[] = [];
+        const lines = gitStatusOut.split("\n");
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            // git status --porcelain output lines start with status code (e.g. M, A, ??), then space, then filename
+            const match = trimmed.match(/^([MADRC? ]+)\s+(.+)$/);
+            if (match) {
+                const file = match[2].trim();
+                if (file !== ".agy_prompt.txt") {
+                    modifiedFiles.push(file);
+                }
+            }
+        }
+
+        if (modifiedFiles.length === 0) {
+            return {
+                success: false,
+                modifiedFiles: [],
+                summary: "agy finished, but no files were modified.",
+                testOutput: "No tests run or passed.",
+                confidence: "LOW",
+            };
+        }
+
+        console.log(`[Agy] Successfully completed. Modified files: ${modifiedFiles.join(", ")}`);
+        return {
+            success: true,
+            modifiedFiles,
+            summary: `Successfully completed fixing and reproduction via agy CLI.`,
+            testOutput: "Tests passed/run by agy.",
+            confidence: "HIGH",
+        };
+
+    } catch (e: any) {
+        console.error(`[Agy] Failed during execution: ${e.message}`);
+        return {
+            success: false,
+            modifiedFiles: [],
+            summary: `agy execution failed: ${e.message}`,
+            testOutput: "",
+            confidence: "LOW",
+        };
     }
 }

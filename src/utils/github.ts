@@ -9,9 +9,9 @@ dotenv.config();
 export class GitHubService {
     public octokit: Octokit;
     private git: SimpleGit;
-    private baseDir: string;
+    public baseDir: string;
 
-    constructor(baseDir: string = "./workspace/repos") {
+    constructor(baseDir: string = "/Users/deepshah/Downloads/PRs") {
         const token = process.env.GITHUB_TOKEN;
         if (!token) {
             console.warn("GITHUB_TOKEN not found in environment variables. API calls will be unauthenticated and severely rate-limited.");
