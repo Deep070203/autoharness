@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoHarness — Autonomous Issue Resolver & Proof Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- App Container -->
+    <div class="app-layout">
+        <!-- Top Navbar -->
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <span class="brand-title">AutoHarness</span>
+                    <span class="brand-subtitle">Autonomous Issue Resolver & Proof Engine</span>
+                </div>
+            </div>
+
+            <div class="topbar-center">
+                <div class="breken-banner">
+                    <span class="pulse-dot"></span>
+                    <span class="banner-text">Proves each bug before opening a pull request</span>
+                </div>
+            </div>
+
+            <div class="topbar-actions">
+                <button id="btn-open-memory" class="btn-ghost" title="View Persistent Behavioral Rules (arXiv:2607.13091)">
+                    <span class="icon">🧠</span> Behavioral Memory
+                </button>
+                <div id="status-pill" class="status-pill status-idle">
+                    <span class="status-indicator"></span>
+                    <span id="status-text">SYSTEM IDLE</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content Grid -->
+        <main class="main-content">
+            <!-- Hero / Configuration Section -->
+            <section class="config-card">
+                <div class="card-header">
+                    <h2>🎯 Target Repository & Task</h2>
+                    <span class="hint">Specify an OSS repo and issue, or run in autonomous hunter mode.</span>
+                </div>
+
+                <form id="pipeline-form" class="config-form">
+                    <div class="input-row">
+                        <div class="form-group flex-2">
+                            <label for="repo-input">Target Repository (owner/repo)</label>
+                            <input type="text" id="repo-input" name="repo" placeholder="e.g. posthog/posthog-js" value="semantica-agi/semantica" required>
+                            <div class="quick-chips">
+                                <span class="chip" data-repo="posthog/posthog-js">posthog-js</span>
+                                <span class="chip" data-repo="supabase/realtime">supabase/realtime</span>
+                                <span class="chip" data-repo="getsentry/sentry-go">sentry-go</span>
+                                <span class="chip" data-repo="semantica-agi/semantica">semantica</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group flex-1">
+                            <label for="issue-input">Issue # (leave blank to hunt)</label>
+                            <input type="number" id="issue-input" name="issue" placeholder="e.g. 5121">
+                        </div>
+
+                        <div class="form-group btn-col">
+                            <label>&nbsp;</label>
+                            <button type="submit" id="btn-start" class="btn-primary">
+                                <span class="btn-icon">⚡</span> Start Autonomous Run
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible Advanced Guidance -->
+                    <details class="advanced-details">
+                        <summary>Advanced Guidance Context (Optional Similar Reference)</summary>
+                        <div class="input-row sub-row">
+                            <div class="form-group">
+                                <label for="similar-pr-input">Reference PR # (Pattern Guidance)</label>
+                                <input type="number" id="similar-pr-input" placeholder="e.g. 5120">
+                            </div>
+                            <div class="form-group">
+                                <label for="similar-issue-input">Reference Issue #</label>
+                                <input type="number" id="similar-issue-input" placeholder="e.g. 5090">
+                            </div>
+                        </div>
+                    </details>
+                </form>
+            </section>
+
+            <!-- Visual Pipeline Task Graph -->
+            <section class="pipeline-graph-section">
+                <div class="section-title-row">
+                    <h3>Multi-Role Task Graph</h3>
+                    <span id="elapsed-time" class="timer-badge">Elapsed: 00:00</span>
+                </div>
+
+                <div class="graph-nodes">
+                    <div class="node" id="node-SCOUT">
+                        <div class="node-icon">🔍</div>
+                        <div class="node-info">
+                            <span class="node-label">1. Scout</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-INTERVIEW">
+                        <div class="node-icon">🛡️</div>
+                        <div class="node-info">
+                            <span class="node-label">2. Viability</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-REPRODUCE">
+                        <div class="node-icon">🧪</div>
+                        <div class="node-info">
+                            <span class="node-label">3. Proof Protocol</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-LOCALIZE">
+                        <div class="node-icon">🎯</div>
+                        <div class="node-info">
+                            <span class="node-label">4. Localizer</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-CODEFIX">
+                        <div class="node-icon">🔧</div>
+                        <div class="node-info">
+                            <span class="node-label">5. Fixer (agy)</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-VERIFY">
+                        <div class="node-icon">✅</div>
+                        <div class="node-info">
+                            <span class="node-label">6. QA Verifier</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                    <div class="node-connector"></div>
+
+                    <div class="node" id="node-GATE">
+                        <div class="node-icon">🛑</div>
+                        <div class="node-info">
+                            <span class="node-label">7. Human Gate</span>
+                            <span class="node-status">Waiting</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Human Review Gate Slide-in Banner (Visible when Awaiting Review) -->
+            <section id="gate-banner" class="gate-banner hidden">
+                <div class="gate-content">
+                    <div class="gate-badge">🛑 HUMAN REVIEW GATE REQUIRED</div>
+                    <h2 id="gate-pr-title" class="gate-title">Drafting PR...</h2>
+                    <p id="gate-pr-summary" class="gate-summary"></p>
+                    
+                    <div class="gate-actions-row">
+                        <div class="gate-feedback-input-wrap">
+                            <input type="text" id="gate-notes" placeholder="Optional review note / lesson (stored in arXiv:2607.13091 memory)...">
+                        </div>
+                        <button id="btn-gate-approve" class="btn-success">
+                            ✓ Approve & Submit PR
+                        </button>
+                        <button id="btn-gate-reject" class="btn-danger">
+                            ✕ Reject with Feedback
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Workspace: Left Log Stream, Right Proof & Diff Inspector -->
+            <div class="workspace-grid">
+                <!-- Terminal & Agent Logs Column -->
+                <div class="panel terminal-panel">
+                    <div class="panel-header">
+                        <div class="terminal-dots">
+                            <span class="dot dot-red"></span>
+                            <span class="dot dot-yellow"></span>
+                            <span class="dot dot-green"></span>
+                        </div>
+                        <span class="panel-title">Real-Time Execution Logs (`agy` & Pipeline)</span>
+                        <button id="btn-clear-logs" class="btn-mini">Clear</button>
+                    </div>
+                    <div id="terminal-body" class="terminal-body">
+                        <div class="log-line sys">[System] AutoHarness engine standby. Configure a repository and launch a run.</div>
+                    </div>
+                </div>
+
+                <!-- Inspector Column -->
+                <div class="panel inspector-panel">
+                    <div class="panel-header inspector-tabs">
+                        <button class="tab-btn active" data-tab="tab-proof">
+                            🧪 Breken Proof Evidence
+                        </button>
+                        <button class="tab-btn" data-tab="tab-diff">
+                            📄 Unified Diff
+                        </button>
+                        <button class="tab-btn" data-tab="tab-localization">
+                            🎯 Fault Localization
+                        </button>
+                    </div>
+
+                    <div class="tab-content-wrap">
+                        <!-- Tab 1: Proof & Evidence -->
+                        <div id="tab-proof" class="tab-pane active">
+                            <div class="proof-container">
+                                <div class="proof-box proof-fail">
+                                    <div class="proof-box-header">
+                                        <span class="proof-badge badge-fail">❌ Initial Failing Reproduction</span>
+                                        <span id="proof-repro-cmd" class="proof-cmd">Command: N/A</span>
+                                    </div>
+                                    <pre id="proof-fail-output" class="code-block">Waiting for reproduction protocol to formulate test case...</pre>
+                                </div>
+
+                                <div class="proof-box proof-pass">
+                                    <div class="proof-box-header">
+                                        <span class="proof-badge badge-pass">✅ Post-Fix Verification</span>
+                                        <span id="proof-verify-summary" class="proof-cmd">Status: Pending Fix</span>
+                                    </div>
+                                    <pre id="proof-pass-output" class="code-block">Verification will run automatically after surgical patch...</pre>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tab 2: Diff -->
+                        <div id="tab-diff" class="tab-pane">
+                            <div class="diff-header-info">
+                                <span id="diff-file-count">0 files modified</span>
+                            </div>
+                            <pre id="diff-output" class="code-block diff-code">(No code diff generated yet)</pre>
+                        </div>
+
+                        <!-- Tab 3: Localization -->
+                        <div id="tab-localization" class="tab-pane">
+                            <div class="localization-view">
+                                <h4>Target Files Isolated by Localizer Agent:</h4>
+                                <ul id="localization-files-list" class="target-files-list">
+                                    <li class="empty-state">No files targeted yet.</li>
+                                </ul>
+                                <h4>Likely Functions / Symbols:</h4>
+                                <p id="localization-symbols" class="dim-text">N/A</p>
+                                <h4>Localization Rationale:</h4>
+                                <p id="localization-explanation" class="dim-text">N/A</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal: Behavioral Memory (arXiv:2607.13091) -->
+    <div id="memory-modal" class="modal-backdrop hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>🧠 Accumulated Behavioral Rules (arXiv:2607.13091)</h3>
+                <button id="btn-close-memory" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-desc">
+                    These rules persist across runs without model retraining. Every human approval or rejection automatically ratchets new behavioral standards into this memory bank.
+                </p>
+                <div class="rules-list-container">
+                    <pre id="rules-display" class="rules-pre">Loading rules...</pre>
+                </div>
+
+                <div class="add-rule-form">
+                    <h4>Add Custom Behavioral Rule</h4>
+                    <div class="input-row">
+                        <input type="text" id="new-rule-input" placeholder="e.g. Always check array length before accessing element [0]" class="flex-2">
+                        <button id="btn-add-rule" class="btn-primary">Add Rule</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

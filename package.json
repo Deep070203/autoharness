@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx bin/pipeline.ts",
+    "ui": "tsx src/server/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -16,10 +17,12 @@
     "@octokit/rest": "^22.0.1",
     "ai": "latest",
     "dotenv": "^17.4.2",
+    "express": "^5.3.0",
     "simple-git": "^3.36.0",
     "zod": "latest"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "latest",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
