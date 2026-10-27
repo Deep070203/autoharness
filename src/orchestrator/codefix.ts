@@ -148,14 +148,27 @@ function createCodeTools(repoPath: string) {
  * running static analysis, searching for anti-patterns similar to
  * what the original PR fixed, and generating original fixes.
  */
+import type { LocalizationResult } from "./localize.js";
+
 export async function runCodeFixAgent(
     reproResult: ReproductionResult,
     contributingMd: string | null,
     styleGuide: string,
     guidanceContext?: string,
+    localization?: LocalizationResult,
+    accumulatedRules?: string,
+    reproProof?: { command: string; failureTrace: string }
 ): Promise<CodeFixResult> {
     if (process.env.USE_AGY === "true") {
-        return runCodeFixAgentWithAgy(reproResult, contributingMd, styleGuide, guidanceContext);
+        return runCodeFixAgentWithAgy(
+            reproResult,
+            contributingMd,
+            styleGuide,
+            guidanceContext,
+            localization,
+            accumulatedRules,
+            reproProof
+        );
     }
 
     console.log(`\n🔧 Code Fix Agent: Working on ${reproResult.repoPath}`);
@@ -274,35 +287,56 @@ async function runCodeFixAgentWithAgy(
     contributingMd: string | null,
     styleGuide: string,
     guidanceContext?: string,
+    localization?: LocalizationResult,
+    accumulatedRules?: string,
+    reproProof?: { command: string; failureTrace: string }
 ): Promise<CodeFixResult> {
     console.log(`\n🔧 Code Fix Agent (using agy CLI): Working on ${reproResult.repoPath}`);
 
-    let prompt = `You are tasked with fixing a bug in this repository.
+    let prompt = `You are an expert autonomous software engineer resolving an issue in this repository.
 
-### PR Analysis:
+=== CONSTRAINTS & BEHAVIORAL RULES (arXiv:2607.13091 Ratchet) ===
+${accumulatedRules || "1. Keep patches strictly minimal and surgical.\n2. Write or execute a reproduction verification before concluding.\n3. Do not modify unrelated files."}
+
+=== SELF-AWARENESS GUARDRAILS (SWE-agent / Princeton) ===
+- Do NOT claim the bug is fixed without running the reproduction/test commands.
+- Do NOT rewrite entire files or clean up unrelated code.
+- Do NOT relax or delete existing test assertions to make tests pass.
+- Focus ONLY on the root cause. Avoid conversational narration; execute commands directly.`;
+
+    if (localization && localization.targetFiles.length > 0) {
+        prompt += `\n\n=== FAULT LOCALIZATION (Agentless / UIUC) ===
+Target Files: ${localization.targetFiles.join(", ")}
+Target Functions/Symbols: ${localization.likelyFunctions.join(", ") || "See relevant modules"}
+Rationale: ${localization.explanation}`;
+    }
+
+    if (reproProof && reproProof.command) {
+        prompt += `\n\n=== REPRODUCTION PROOF CONTRACT (Breken Protocol) ===
+Reproduction Command: \`${reproProof.command}\`
+Initial Failure Output:
+\`\`\`
+${reproProof.failureTrace.substring(0, 1500)}
+\`\`\`
+MANDATORY: You must make this reproduction command exit 0 (pass) after your patch!`;
+    }
+
+    prompt += `\n\n=== ISSUE & ANALYSIS ===
 ${reproResult.analysis.substring(0, 3000)}
 
-### Original PR Diff (first 6000 chars):
-\`\`\`diff
-${reproResult.diff.substring(0, 6000)}
-\`\`\`
-
-### Affected Files in Original PR:
-${reproResult.affectedFiles.map(f => `- ${f.filename} (${f.status})`).join('\n')}
-
-### Style Guide:
+=== REPOSITORY STYLE & CONVENTIONS ===
 ${styleGuide.substring(0, 800)}`;
 
     if (guidanceContext) {
-        prompt += `\n\n### Additional Guidance / Similar Reference:\n${guidanceContext}`;
+        prompt += `\n\n=== ADDITIONAL REFERENCE GUIDANCE ===\n${guidanceContext}`;
     }
 
-    prompt += `\n\nInstructions:
-1. Study the fix pattern in the diff and analysis above (and any additional reference guidance provided).
-2. Find similar unfixed occurrences of this pattern, or solve the bug in the current repository.
-3. Modify the files appropriately.
-4. Run tests or compiler steps to verify your fix.
-5. Exit when done.`;
+    prompt += `\n\n=== TASK EXECUTION PLAN ===
+1. Inspect the localized target files.
+2. Formulate the minimal surgical fix that resolves the issue.
+3. Apply the patch.
+4. Run the reproduction command (or project tests) to PROVE the fix works with 0 regressions.
+5. Exit cleanly when verified.`;
 
     try {
         // Locate agy executable

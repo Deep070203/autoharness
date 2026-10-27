@@ -1,8 +1,16 @@
 import { parseArgs } from "node:util";
 import { GitHubService } from "../src/utils/github.js";
+import { BehavioralMemory } from "../src/utils/memory.js";
 import { runOuroborosInterview } from "../src/orchestrator/interview.js";
 import { deduplicateCandidate } from "../src/orchestrator/deduplicate.js";
-import { reproduceCandidateLocally, analyzeIssueLocally, type ReproductionResult } from "../src/orchestrator/reproduce.js";
+import {
+    reproduceCandidateLocally,
+    analyzeIssueLocally,
+    attemptReproductionProof,
+    type ReproductionResult
+} from "../src/orchestrator/reproduce.js";
+import { runLocalization } from "../src/orchestrator/localize.js";
+import { runVerification } from "../src/orchestrator/verify.js";
 import { extractMergePatterns } from "../src/orchestrator/style.js";
 import { runCodeFixAgent, type CodeFixResult } from "../src/orchestrator/codefix.js";
 import { draftPullRequest, awaitHumanGates } from "../src/orchestrator/drafting.js";
@@ -17,11 +25,16 @@ interface Candidate {
     url: string;
     author: string;
     labels: string[];
-    sourceType: 'pr' | 'issue';
+    sourceType: "pr" | "issue";
 }
 
 // ── Stages 1 & 2: Sourcing & Filtering ──────────────────────────────────
-async function runStage1And2(github: GitHubService, owner: string, repo: string, targetIssueNumber?: number): Promise<Candidate[]> {
+async function runStage1And2(
+    github: GitHubService,
+    owner: string,
+    repo: string,
+    targetIssueNumber?: number
+): Promise<Candidate[]> {
     console.log(`\n--- Stage 1: Candidate Sourcing for ${owner}/${repo} ---`);
 
     try {
@@ -37,15 +50,15 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string,
                         title: issue.title,
                         body: issue.body || "",
                         url: issue.html_url,
-                        author: issue.user?.login || 'unknown',
-                        labels: issue.labels?.map((l: any) => typeof l === 'string' ? l : l.name) || [],
-                        sourceType: 'issue'
+                        author: issue.user?.login || "unknown",
+                        labels: issue.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
+                        sourceType: "issue"
                     }];
                 } else {
                     console.log(`Issue #${targetIssueNumber} is a pull request. Falling back to default selection.`);
                 }
             } catch (e: any) {
-                console.log(`Failed to fetch issue #${targetIssueNumber} (might not exist): ${e.message}. Falling back to default selection...`);
+                console.log(`Failed to fetch issue #${targetIssueNumber}: ${e.message}. Falling back...`);
             }
         }
 
@@ -60,40 +73,29 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string,
             console.log(`No CONTRIBUTING.md found.`);
         }
 
-        // ── Stage 2: Filtering ───────────────────────────────────────────
-        console.log(`\n--- Stage 2: Filtering ---`);
-
-        // Build candidates from merged PRs
-        const prCandidates: Candidate[] = []
-
-        // Filter: keep only PRs that look like bug fixes
-        console.log(`PR Candidates: ${prCandidates.length}`);
-        // return prCandidates;
-
         // ── Fallback: source from open issues ────────────────────────────
-        console.log(`\nNo merged PR candidates. Falling back to open issues...`);
+        console.log(`\nSourcing from open issues...`);
         const issues = await github.getOpenBugIssues(owner, repo, 20);
         console.log(`Fetched ${issues.length} open issues.`);
 
         const issueCandidates: Candidate[] = issues.map((issue: any) => ({
             number: issue.number,
-            pull_number: issue.number, // reused field — means "issue number" in issue mode
+            pull_number: issue.number,
             title: issue.title,
             body: issue.body || "",
             url: issue.html_url,
-            author: issue.user?.login || 'unknown',
+            author: issue.user?.login || "unknown",
             labels: issue.labels?.map((l: any) => l.name) || [],
-            sourceType: 'issue' as const,
+            sourceType: "issue" as const,
         }));
 
-        // For issues, be more permissive — any open issue is a candidate
         const filteredIssues = issueCandidates.filter(c => {
-            const text = (c.title + ' ' + c.body).toLowerCase();
-            return text.includes('fix') || text.includes('bug') || text.includes('error')
-                || text.includes('issue') || text.includes('broken') || text.includes('fail')
-                || text.includes('wrong') || text.includes('missing') || text.includes('crash')
-                || c.labels.some(l => l.toLowerCase().includes('bug'))
-                || issueCandidates.length <= 5; // if few issues, take them all
+            const text = (c.title + " " + c.body).toLowerCase();
+            return text.includes("fix") || text.includes("bug") || text.includes("error")
+                || text.includes("issue") || text.includes("broken") || text.includes("fail")
+                || text.includes("wrong") || text.includes("missing") || text.includes("crash")
+                || c.labels.some(l => l.toLowerCase().includes("bug"))
+                || issueCandidates.length <= 5;
         });
 
         console.log(`Issue Candidates: ${issueCandidates.length} total, ${filteredIssues.length} after filter`);
@@ -109,12 +111,38 @@ async function runStage1And2(github: GitHubService, owner: string, repo: string,
 async function main() {
     const { values } = parseArgs({
         options: {
-            issue: { type: 'string', short: 'i' },
-            "similar-pr": { type: 'string', short: 'p' },
-            "similar-issue": { type: 'string', short: 's' }
+            repo: { type: "string", short: "r", default: "semantica-agi/semantica" },
+            issue: { type: "string", short: "i" },
+            "similar-pr": { type: "string", short: "p" },
+            "similar-issue": { type: "string", short: "s" },
+            help: { type: "boolean", short: "h" }
         },
         allowPositionals: true
     });
+
+    if (values.help) {
+        console.log(`
+AutoHarness — Autonomous Issue Resolver & Coding Agent
+Usage:
+  npx tsx bin/pipeline.ts [options]
+
+Options:
+  -r, --repo <owner/repo>       Target repository (default: semantica-agi/semantica)
+  -i, --issue <number>          Specific GitHub issue number to reproduce and fix
+  -p, --similar-pr <number>     Reference PR number for style and fix guidance
+  -s, --similar-issue <number>  Reference issue number for extra guidance
+  -h, --help                    Show this help message
+        `);
+        process.exit(0);
+    }
+
+    const repoInput = values.repo || "semantica-agi/semantica";
+    const [targetOwner, targetRepo] = repoInput.split("/");
+
+    if (!targetOwner || !targetRepo) {
+        console.error(`Invalid repository format: "${repoInput}". Expected format: owner/repo (e.g. posthog/posthog-js)`);
+        process.exit(1);
+    }
 
     const targetIssueNumber = values.issue ? parseInt(values.issue, 10) : undefined;
     if (targetIssueNumber && isNaN(targetIssueNumber)) {
@@ -135,15 +163,15 @@ async function main() {
     }
 
     const github = new GitHubService();
+    const memory = new BehavioralMemory();
 
-    const targetOwner = "semantica-agi";
-    const targetRepo = "semantica";
+    console.log(`\n${"═".repeat(60)}`);
+    console.log(`  Autonomous Issue Resolver & Coding Agent`);
+    console.log(`  Target: ${targetOwner}/${targetRepo}`);
+    console.log(`  Closed-Loop Behavioral Memory: Active (arXiv:2607.13091)`);
+    console.log(`${"═".repeat(60)}`);
 
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log(`  OSS Contributor Pipeline: ${targetOwner}/${targetRepo}`);
-    console.log(`${'═'.repeat(60)}`);
-
-    // ── Stages 1 & 2 ────────────────────────────────────────────────────
+    // ── Stages 1 & 2: Sourcing ──────────────────────────────────────────
     const candidates = await runStage1And2(github, targetOwner, targetRepo, targetIssueNumber);
     if (candidates.length === 0) {
         console.log("No candidates found. Exiting.");
@@ -174,18 +202,16 @@ async function main() {
     console.log(`\n--- Stage 4 Complete: ${uniqueCandidates.length} unique candidates ---`);
     if (uniqueCandidates.length === 0) { console.log("No unique candidates. Exiting."); return; }
 
-    // ── Stage 5: Analysis (PR mode or Issue mode) ────────────────────────
+    // ── Stage 5: Analysis & Workspace Preparation ────────────────────────
     let bestResult: ReproductionResult | null = null;
     let bestCandidate: Candidate | null = null;
 
     for (const candidate of uniqueCandidates) {
         let result: ReproductionResult;
 
-        if (candidate.sourceType === 'issue') {
-            // Issue mode: no diff, analyze the issue body directly
+        if (candidate.sourceType === "issue") {
             result = await analyzeIssueLocally(candidate, github, targetOwner, targetRepo);
         } else {
-            // PR mode: fetch diff and analyze the fix pattern
             result = await reproduceCandidateLocally(candidate, github, targetOwner, targetRepo);
         }
 
@@ -205,7 +231,24 @@ async function main() {
 
     console.log(`\n--- Stage 5 Complete: Advancing '${bestCandidate.title}' (source: ${bestCandidate.sourceType}) ---`);
 
-    // ── Fetch Guidance Context (if similar PR or Issue number is specified) ──
+    // ── Breken Proof Protocol: Formulate & Verify Failing Repro ─────────
+    let reproProof: { command: string; failureTrace: string } | undefined;
+    if (bestCandidate.sourceType === "issue") {
+        reproProof = await attemptReproductionProof(bestCandidate, bestResult.repoPath);
+        if (reproProof) {
+            console.log(`\n🔬 [Proof Protocol] Verified initial reproduction failure: \`${reproProof.command}\``);
+        }
+    }
+
+    // ── Agentless Fault Localization (File & Symbol Boundary) ───────────
+    const localization = await runLocalization(
+        bestResult.repoPath,
+        bestCandidate.title,
+        bestCandidate.body,
+        reproProof?.failureTrace || bestResult.analysis
+    );
+
+    // ── Fetch Guidance Context (Optional Similar Reference PR/Issue) ────
     let guidanceContext = "";
     if (similarPrNumber) {
         console.log(`Fetching guidance context from similar PR #${similarPrNumber}...`);
@@ -237,8 +280,17 @@ async function main() {
     const repoStyleGuide = await extractMergePatterns(github, targetOwner, targetRepo);
     console.log(`\n--- Stage 8 Complete ---`);
 
-    // ── Code Fix Agent (the real work) ──────────────────────────────────
-    const codeFix: CodeFixResult = await runCodeFixAgent(bestResult, contributingMd, repoStyleGuide, guidanceContext);
+    // ── Code Fix Agent (using agy CLI with empirical prompts) ────────────
+    const accumulatedRules = memory.getFormattedRules(targetOwner, targetRepo);
+    const codeFix: CodeFixResult = await runCodeFixAgent(
+        bestResult,
+        contributingMd,
+        repoStyleGuide,
+        guidanceContext,
+        localization,
+        accumulatedRules,
+        reproProof
+    );
 
     if (!codeFix.success) {
         console.log(`\n⚠️  Code Fix Agent did not produce a fix. Exiting.`);
@@ -248,11 +300,27 @@ async function main() {
 
     console.log(`\n--- Code Fix Complete: ${codeFix.modifiedFiles.length} files changed ---`);
 
-    // ── Stage 9 & 10: Drafting (using real code changes) ────────────────
-    const draft = await draftPullRequest(bestCandidate, repoStyleGuide, codeFix, github, targetOwner, targetRepo);
+    // ── Verifier & QA Agent (SWE-bench / Breken Proof Contract) ─────────
+    const verification = await runVerification(bestResult.repoPath, reproProof?.command);
+    console.log(`[Verification Outcome]: ${verification.summary}`);
 
-    // ── Stage 11 & 12: Human Review Gate ────────────────────────────────
-    const isApproved = await awaitHumanGates(draft, codeFix);
+    // ── Stage 9 & 10: Drafting Proof-Backed PR ──────────────────────────
+    const draft = await draftPullRequest(
+        bestCandidate,
+        repoStyleGuide,
+        codeFix,
+        github,
+        targetOwner,
+        targetRepo,
+        {
+            reproCommand: reproProof?.command,
+            failureTrace: reproProof?.failureTrace,
+            verification
+        }
+    );
+
+    // ── Stage 11 & 12: Human Review Gate (Closed-Loop Ratchet) ──────────
+    const isApproved = await awaitHumanGates(draft, codeFix, targetOwner, targetRepo, memory);
     if (!isApproved) {
         console.log(`Pipeline halted by human operator.`);
         return;

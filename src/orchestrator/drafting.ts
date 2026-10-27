@@ -2,15 +2,22 @@ import { generateText, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
 import { GitHubService } from "../utils/github.js";
 import type { CodeFixResult } from "./codefix.js";
+import type { VerificationResult } from "./verify.js";
+import type { BehavioralMemory } from "../utils/memory.js";
 import * as readline from "readline";
 
 const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
 
+export interface ProofContext {
+    reproCommand?: string;
+    failureTrace?: string;
+    verification?: VerificationResult;
+}
+
 /**
- * Stages 9 & 10: Drafting the Issue/PR and Polishing.
- *
- * Now accepts real CodeFixResult data to generate an accurate PR description
- * based on actual code changes made by the coding agent.
+ * Stages 9 & 10: Drafting the Pull Request (Breken Proof Format).
+ * Formats a high-signal PR description with root-cause analysis, proof of reproduction,
+ * surgical diff summary, and verification output.
  */
 export async function draftPullRequest(
     candidate: any,
@@ -18,32 +25,43 @@ export async function draftPullRequest(
     codeFix: CodeFixResult,
     github: GitHubService,
     owner: string,
-    repo: string
+    repo: string,
+    proof?: ProofContext
 ): Promise<{ title: string; body: string }> {
-    console.log(`\n✏️  Stage 9 & 10: Drafting Pull Request for: ${candidate.title}`);
+    console.log(`\n✏️  Stage 9 & 10: Drafting Proof-Backed Pull Request for: ${candidate.title}`);
 
     const prompt = `
-You are drafting a Pull Request for the ${owner}/${repo} repository.
-An automated coding agent has made real code changes. You must write a PR title and body that ACCURATELY describes what was actually changed.
+You are drafting a high-signal, maintainer-friendly Pull Request for ${owner}/${repo} (following the Breken AI OSS standard).
+An automated coding agent has made surgical code changes and verified them against reproduction tests.
 
-### Extracted Style Guide for this Repo:
+### Repository Conventions:
 ${styleGuide}
 
-### Original Issue / Candidate Context:
+### Candidate / Issue Context:
 Title: ${candidate.title}
 URL: ${candidate.url}
 
-### Actual Code Changes Made by the Agent:
+### Actual Code Changes Made by Agent:
 Summary: ${codeFix.summary}
-Files Modified: ${codeFix.modifiedFiles.join(', ')}
+Files Modified: ${codeFix.modifiedFiles.join(", ")}
 Test Result: ${codeFix.testOutput}
-Confidence: ${codeFix.confidence}
+
+### Reproduction & Verification Proof:
+Reproduction Command: ${proof?.reproCommand || "N/A"}
+Initial Failure Observed:
+${proof?.failureTrace ? proof.failureTrace.substring(0, 1000) : "N/A"}
+Verification Status:
+${proof?.verification ? proof.verification.summary : "Verified locally"}
 
 Draft the PR title and body.
-- The title and body must describe what the agent ACTUALLY changed — do NOT invent changes that weren't made.
-- Adhere strictly to the Style Guide provided.
-- Be honest about the scope and nature of the fix.
-- If the style guide requires specific headers, use them exactly.
+Requirements:
+1. Title should follow conventional commits if the repo uses them (e.g. \`fix(scope): concise description\`).
+2. Body should be structured cleanly:
+   - ## Summary (concise explanation of bug and fix)
+   - ## Root Cause
+   - ## Proof & Verification (mention the failing test/reproduction and confirmation of pass)
+   - ## Affected Files
+3. Do NOT invent hypothetical changes. Be surgical, precise, and maintainer-friendly.
 
 OUTPUT FORMAT:
 TITLE: [Your Drafted Title]
@@ -54,15 +72,15 @@ BODY:
     try {
         const { text } = await generateText({
             model: MODEL,
-            prompt: prompt,
-            system: "You are a professional software engineer drafting a PR. Write only the requested title and body. Be accurate — describe real changes, not hypothetical ones.",
+            prompt,
+            system: "You are an expert OSS contributor drafting a maintainer-grade pull request. Focus on concrete evidence and surgical accuracy.",
         });
 
         const titleMatch = text.match(/TITLE:\s*(.*)/i);
         const bodyMatch = text.match(/BODY:\s*([\s\S]*)/i);
 
         const draft = {
-            title: titleMatch ? titleMatch[1].trim() : `Fix: ${candidate.title}`,
+            title: titleMatch ? titleMatch[1].trim() : `fix: ${candidate.title}`,
             body: bodyMatch ? bodyMatch[1].trim() : `Automated fix related to: ${candidate.url}\n\n${codeFix.summary}`,
         };
 
@@ -72,46 +90,63 @@ BODY:
     } catch (e: any) {
         console.error(`[Draft] Generation failed: ${e.message}`);
         return {
-            title: `Fix: ${candidate.title}`,
-            body: `Automated fix.\n\n**Summary:** ${codeFix.summary}\n\n**Files:** ${codeFix.modifiedFiles.join(', ')}`,
+            title: `fix: ${candidate.title}`,
+            body: `Automated fix for #${candidate.number}.\n\n**Summary:** ${codeFix.summary}\n\n**Files:** ${codeFix.modifiedFiles.join(", ")}`,
         };
     }
 }
 
 /**
- * Stages 11 & 12: The Human Gates.
- *
- * Pipeline pauses and requests human interaction for Viability & CLA.
- * Now also shows the actual files changed for review.
+ * Stages 11 & 12: The Human Gate with Closed-Loop Behavioral Ratchet (arXiv:2607.13091).
+ * If approved or rejected, captures feedback to update persistent behavioral memory.
  */
 export async function awaitHumanGates(
     draft: { title: string; body: string },
     codeFix: CodeFixResult,
+    owner: string,
+    repo: string,
+    memory?: BehavioralMemory
 ): Promise<boolean> {
     console.log(`\n🛑 Stage 11 & 12: HUMAN REVIEW GATE`);
-    console.log(`──────────────────────────────────────────────────`);
+    console.log(`────────────────────────────────────────────────────────────`);
     console.log(`TITLE: ${draft.title}`);
     console.log(`\nBODY:\n${draft.body}`);
-    console.log(`\nFILES CHANGED: ${codeFix.modifiedFiles.join(', ')}`);
+    console.log(`\nFILES CHANGED: ${codeFix.modifiedFiles.join(", ")}`);
     console.log(`AGENT CONFIDENCE: ${codeFix.confidence}`);
     console.log(`TEST RESULT: ${codeFix.testOutput}`);
-    console.log(`──────────────────────────────────────────────────`);
+    console.log(`────────────────────────────────────────────────────────────`);
 
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
     });
 
-    return new Promise((resolve) => {
-        rl.question("[Human Gate] Do you approve this draft and authorize CLA signature? (yes/no): ", (answer) => {
-            rl.close();
-            if (answer.toLowerCase() === 'yes' || answer.toLowerCase() === 'y') {
-                console.log(`[Human Gate] Approved. Proceeding to submission...`);
-                resolve(true);
-            } else {
-                console.log(`[Human Gate] Rejected by human operator.`);
-                resolve(false);
+    const askQuestion = (query: string): Promise<string> =>
+        new Promise((resolve) => rl.question(query, resolve));
+
+    try {
+        const answer = await askQuestion("[Human Gate] Do you approve this draft and authorize PR submission? (yes/no): ");
+        const approved = answer.trim().toLowerCase() === "yes" || answer.trim().toLowerCase() === "y";
+
+        if (approved) {
+            console.log(`[Human Gate] Approved! Proceeding to submission...`);
+            const notes = await askQuestion("[Human Gate] Optional approval note / rule to remember for next time (press Enter to skip): ");
+            if (notes.trim() && memory) {
+                await memory.distillReviewFeedback(notes.trim(), owner, repo, true);
             }
-        });
-    });
+            rl.close();
+            return true;
+        } else {
+            console.log(`[Human Gate] Rejected by human operator.`);
+            const feedback = await askQuestion("[Human Gate] What was wrong? (Feeds behavioral memory ratchet): ");
+            if (feedback.trim() && memory) {
+                await memory.distillReviewFeedback(feedback.trim(), owner, repo, false);
+            }
+            rl.close();
+            return false;
+        }
+    } catch (e) {
+        rl.close();
+        return false;
+    }
 }

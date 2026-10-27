@@ -27,6 +27,10 @@ export interface ReproductionResult {
     prNumber: number;
     /** Summary of what the original fix did */
     fixSummary: string;
+    /** Optional shell command that reproduces the issue */
+    reproCommand?: string;
+    /** Output/trace of the initial reproduction failure (Breken proof) */
+    initialFailingTrace?: string;
 }
 
 /**
@@ -263,3 +267,72 @@ End with exactly: VIABLE: YES or VIABLE: NO
         return emptyResult;
     }
 }
+
+/**
+ * Breken Proof Protocol: Attempts to generate or run a minimal reproduction command
+ * that proves the bug exists by failing (exit !== 0) before any fix is attempted.
+ */
+export async function attemptReproductionProof(
+    issue: { number: number; title: string; body: string },
+    repoPath: string
+): Promise<{ command: string; failureTrace: string } | undefined> {
+    console.log(`\n🧪 [Proof Protocol] Formulating reproduction test case for issue #${issue.number}...`);
+
+    const prompt = `
+You are an expert QA Engineer implementing the Breken Autonomous Proof Protocol.
+Given a bug report, formulate a minimal shell command or one-line test command that reproduces the failure.
+If the issue mentions a specific command, test file, or flags, use them.
+If it involves running an existing test or script, specify it.
+
+Issue Title: ${issue.title}
+Issue Description:
+${issue.body ? issue.body.substring(0, 2000) : "No description"}
+
+OUTPUT:
+If a reproduction command is possible, output exactly:
+REPRO_COMMAND: <bash command to run inside repo directory>
+
+If reproducing requires extensive manual setup or cannot be executed in 1 command, output:
+REPRO_COMMAND: NONE
+`;
+
+    try {
+        const { text } = await generateText({
+            model: MODEL,
+            prompt,
+            system: "You generate concrete reproduction commands. Output only REPRO_COMMAND: ...",
+        });
+
+        const match = text.match(/REPRO_COMMAND:\s*(.*)/i);
+        if (!match || match[1].trim() === "NONE" || match[1].trim().length < 3) {
+            console.log(`[Proof Protocol] No direct automated command extracted.`);
+            return undefined;
+        }
+
+        const command = match[1].trim().replace(/^`/, "").replace(/`$/, "");
+        console.log(`[Proof Protocol] Executing candidate repro: ${command}`);
+
+        const { execSync } = require("child_process");
+        try {
+            execSync(command, {
+                cwd: repoPath,
+                encoding: "utf-8",
+                timeout: 45_000,
+                env: { ...process.env, CI: "true" }
+            });
+            console.log(`[Proof Protocol] Repro command passed unexpectedly (exit 0). Proof not confirmed.`);
+            return undefined;
+        } catch (err: any) {
+            const failureTrace = (err.stdout || err.stderr || err.message).substring(0, 2000);
+            console.log(`[Proof Protocol] 🎯 Confirmed failing reproduction (exit ${err.status || 1})!`);
+            return {
+                command,
+                failureTrace
+            };
+        }
+    } catch (e: any) {
+        console.warn(`[Proof Protocol] Could not establish automated repro: ${e.message}`);
+        return undefined;
+    }
+}
+
