@@ -3,20 +3,16 @@
   "version": "0.1.0",
   "description": "Autonomous agent harness engineering — TypeScript (LLM-agnostic)",
   "type": "module",
-  "main": "dist/agent.js",
+  "main": "dist/bin/pipeline.js",
   "scripts": {
     "build": "tsc",
-    "start": "tsx agent.ts",
+    "start": "tsx bin/pipeline.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "latest",
     "@ai-sdk/google": "latest",
-    "@ai-sdk/mcp": "^1.0.35",
     "@ai-sdk/openai": "latest",
-    "@anthropic-ai/claude-agent-sdk": "latest",
-    "@browserbasehq/stagehand": "^3.2.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/rest": "^22.0.1",
     "ai": "latest",
     "dotenv": "^17.4.2",

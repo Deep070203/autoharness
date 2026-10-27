@@ -1,6 +1,5 @@
 import { generateText, LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
-import { IssueState, PipelineStage } from "./state.js";
 import { GitHubService } from "../utils/github.js";
 
 const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
@@ -25,7 +24,7 @@ export async function runOuroborosInterview(
 You are an expert open-source maintainer acting as an initial viability filter.
 Your goal is to decide if a given bug fix or patch is appropriate for an AI agent to build a variation of, or learn from.
 
-We only want to pursue candidates that resolve clear, reproducible bugs or security issues or project analysis work.
+We only want to pursue candidates that resolve clear, reproducible bugs or security issues or project analysis or docunetation changes work.
 We can also have features, sprawling refactors, UI tweaks, or changes but they should not be in conflict with project philosophy.
 
 ### Candidate PR:
@@ -38,7 +37,7 @@ ${candidate.body || "No body provided."}
 ${contributingMd ? contributingMd.substring(0, 2000) : "No contributing guidelines found."}
 
 ### Task:
-Evaluate this candidate. Does this represent a clear, intentional bug fix that is suitable for a secondary agent to reproduce locally and draft a similar fix for?
+Evaluate this candidate. Does this represent a clear, intentional bug fix or a documentation change that is suitable for a secondary agent to reproduce locally and draft a similar fix for?
 You must end your response with exactly "DECISION: KEEP" or "DECISION: DROP".
 `;
 

@@ -44,7 +44,6 @@ src/orchestrator/
   submit.ts                    -- Stage 13: git push + PR creation
   state.ts                     -- Pipeline state types
 src/utils/github.ts            -- GitHub API service (Octokit + simple-git)
-agent.ts                       -- Meta-agent harness (Harbor benchmarks)
 ```
 
 ## How to Contribute

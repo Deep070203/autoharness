@@ -136,8 +136,8 @@ async function main() {
 
     const github = new GitHubService();
 
-    const targetOwner = "prowler-cloud";
-    const targetRepo = "prowler";
+    const targetOwner = "semantica-agi";
+    const targetRepo = "semantica";
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`  OSS Contributor Pipeline: ${targetOwner}/${targetRepo}`);

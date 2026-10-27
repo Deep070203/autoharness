@@ -66,7 +66,6 @@ The target repo is configured in `bin/pipeline.ts` (default: `exo-explore/exo`).
 - Node.js 22+
 - GitHub personal access token (for API + push)
 - Google AI API key (for LLM stages)
-- Docker (optional, for sandboxed meta-agent harness)
 
 ### Setup
 
@@ -81,7 +80,8 @@ GOOGLE_GENERATIVE_AI_API_KEY=...
 EOF
 
 # 3. Run the OSS pipeline
-npx tsx bin/pipeline.ts
+npm start
+# or: npx tsx bin/pipeline.ts
 ```
 
 ## Project Structure
@@ -98,43 +98,16 @@ src/orchestrator/
   codefix.ts                -- Code Fix Agent: tool-calling LLM with 6 tools
   drafting.ts               -- Stage 9-10: PR title/body from real code changes
   submit.ts                 -- Stage 13: git push + PR creation
-  state.ts                  -- Pipeline state types and GitHub issue tracker
 
 src/utils/
   github.ts                 -- GitHub service (Octokit + simple-git)
                                getPRDiff, getPRFiles, getDefaultBranch,
                                forkRepository, cloneRepository, etc.
-
-agent.ts                    -- Meta-agent harness (Harbor benchmark runner)
-program.md                  -- Meta-agent instructions + directive
-Dockerfile.base             -- Base image (Node 22)
-tasks/                      -- Benchmark tasks (Harbor format)
-```
-
-## Meta-Agent Harness
-
-The repo also includes a **meta-agent loop** for benchmark-driven harness engineering:
-
-- **`agent.ts`** — the harness under test. Contains config, tool definitions, agent construction, and orchestration. The adapter section is fixed; the rest is the edit surface.
-- **`program.md`** — instructions for the meta-agent directing what kind of agent to build.
-- **`tasks/`** — evaluation tasks in [Harbor](https://github.com/harbor-framework/harbor) format.
-
-The meta-agent hill-climbs on benchmark scores by modifying `agent.ts`.
-
-```bash
-# Build base image
-docker build -f Dockerfile.base -t autoharness-base .
-
-# Run all tasks
-rm -rf jobs; mkdir -p jobs && \
-  uv run harbor run -p tasks/ -n 100 \
-  --agent-import-path agent:AutoAgent \
-  -o jobs --job-name latest > run.log 2>&1
 ```
 
 ## Switching Models
 
-Change the `MODEL` constant in `agent.ts` or the orchestrator files:
+Change the `MODEL` constant in the orchestrator files:
 
 ```typescript
 import { google } from "@ai-sdk/google";
@@ -168,9 +141,6 @@ const MODEL = google("gemini-2.5-flash");
 ## Cleanup
 
 ```bash
-# Docker cleanup
-docker system prune -a -f
-
 # Remove cloned repos
 rm -rf workspace/repos/*
 ```
