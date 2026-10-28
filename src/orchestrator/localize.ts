@@ -3,7 +3,7 @@ import { google } from "@ai-sdk/google";
 import * as path from "path";
 import { execSync } from "child_process";
 
-const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
 
 export interface LocalizationResult {
     targetFiles: string[];

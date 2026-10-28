@@ -15,7 +15,10 @@ import { extractMergePatterns } from "./style.js";
 import { runCodeFixAgent, type CodeFixResult } from "./codefix.js";
 import { draftPullRequest } from "./drafting.js";
 import { submitPullRequest } from "./submit.js";
+import { BugHunterAgent } from "./hunter.js";
 import { execSync } from "node:child_process";
+import * as path from "node:path";
+import * as fs from "node:fs";
 
 export interface PipelineOptions {
     repo: string; // "owner/repo"
@@ -93,12 +96,13 @@ export class PipelineEngine extends EventEmitter {
         this.emitPipelineEvent("stage:start", "SCOUT", { repo: options.repo, issue: options.issueNumber });
 
         try {
-            // ── Stage 1 & 2: Sourcing ──────────────────────────────────────
-            this.emitPipelineEvent("stage:log", "SCOUT", `Connecting to GitHub repository ${targetOwner}/${targetRepo}...`);
             let candidate: any = null;
+            let reproResult: ReproductionResult | null = null;
+            let reproProof: { command: string; failureTrace: string } | undefined;
 
             if (options.issueNumber) {
-                this.emitPipelineEvent("stage:log", "SCOUT", `Fetching issue #${options.issueNumber}...`);
+                // ── Mode 1: Targeted Issue Resolution ─────────────────────
+                this.emitPipelineEvent("stage:log", "SCOUT", `Fetching issue #${options.issueNumber} from GitHub...`);
                 const issue = await this.github.getIssue(targetOwner, targetRepo, options.issueNumber);
                 candidate = {
                     number: issue.number,
@@ -110,79 +114,156 @@ export class PipelineEngine extends EventEmitter {
                     labels: issue.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
                     sourceType: "issue"
                 };
-            } else {
-                this.emitPipelineEvent("stage:log", "SCOUT", `Autonomous Hunter: scanning recent open bug issues...`);
-                const openIssues = await this.github.getOpenBugIssues(targetOwner, targetRepo, 10);
-                if (openIssues.length === 0) {
-                    throw new Error(`No open bug issues found for ${targetOwner}/${targetRepo}`);
+
+                this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
+
+                // Viability interview
+                this.emitPipelineEvent("stage:start", "INTERVIEW", { title: candidate.title });
+                const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
+                const isViable = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
+                this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: isViable });
+
+                // Setup local workspace & analysis
+                this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
+                reproResult = await analyzeIssueLocally(candidate, this.github, targetOwner, targetRepo);
+                if (!reproResult.viable) {
+                    throw new Error(`Issue analysis concluded not viable for automated patch.`);
                 }
-                const first = openIssues[0];
-                candidate = {
-                    number: first.number,
-                    pull_number: first.number,
-                    title: first.title,
-                    body: first.body || "",
-                    url: first.html_url,
-                    author: first.user?.login || "unknown",
-                    labels: first.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
-                    sourceType: "issue"
-                };
-            }
+                this.emitPipelineEvent("stage:complete", "ANALYSIS", { analysis: reproResult.analysis });
 
-            this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
+                // Attempt Breken reproduction proof
+                this.emitPipelineEvent("stage:start", "REPRODUCE", { repoPath: reproResult.repoPath });
+                reproProof = await attemptReproductionProof(candidate, reproResult.repoPath);
+                if (reproProof) {
+                    this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
+                    this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: true, command: reproProof.command });
+                } else {
+                    this.emitPipelineEvent("stage:log", "REPRODUCE", `No direct automated reproduction command extracted; proceeding with contextual analysis.`);
+                    this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: false });
+                }
 
-            // ── Stage 3: Viability Interview ──────────────────────────────
-            this.emitPipelineEvent("stage:start", "INTERVIEW", { title: candidate.title });
-            this.emitPipelineEvent("stage:log", "INTERVIEW", `Running Ouroboros viability interview...`);
-            const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
-            const isViable = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
+            } else {
+                // ── Mode 2: True Autonomous Bug Hunter Mode (Zero-Issue) ──
+                this.emitPipelineEvent("stage:start", "HUNTER", { repo: options.repo });
+                this.emitPipelineEvent("stage:log", "HUNTER", `Cloning ${targetOwner}/${targetRepo} to prepare deep code audit...`);
 
-            if (!isViable && !options.issueNumber) {
-                throw new Error(`Candidate #${candidate.number} was dropped by viability filter.`);
-            }
-            this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: true });
+                let forkUrl = `https://github.com/${targetOwner}/${targetRepo}.git`;
+                let localDirName = targetRepo;
+                if (process.env.GITHUB_TOKEN && process.env.GITHUB_TOKEN !== "placeholder_needs_token") {
+                    try {
+                        const forkData = await this.github.forkRepository(targetOwner, targetRepo);
+                        forkUrl = forkData.clone_url;
+                        localDirName = forkData.name;
+                    } catch (e: any) {}
+                }
 
-            // ── Stage 4: Deduplication ────────────────────────────────────
-            this.emitPipelineEvent("stage:start", "DEDUPLICATE", { title: candidate.title });
-            if (!options.issueNumber) {
-                const isUnique = await deduplicateCandidate(candidate, this.github, targetOwner, targetRepo);
-                if (!isUnique) {
-                    throw new Error(`Candidate #${candidate.number} dropped as duplicate.`);
+                await this.github.cloneRepository(forkUrl, localDirName);
+                const repoPath = path.join(this.github.baseDir, localDirName);
+
+                this.emitPipelineEvent("stage:log", "HUNTER", `Auditing codebase against Breken bug archetypes (type panics, mutation, protocol drops, unhandled fallbacks)...`);
+                const hunter = new BugHunterAgent(repoPath, targetOwner, targetRepo);
+                const huntedBug = await hunter.hunt((msg) => this.emitPipelineEvent("stage:log", "HUNTER", msg));
+
+                if (huntedBug) {
+                    this.emitPipelineEvent("stage:complete", "HUNTER", { bug: huntedBug });
+                    candidate = {
+                        number: 0,
+                        pull_number: 0,
+                        title: huntedBug.title,
+                        body: `${huntedBug.description}\n\n**Archetype:** ${huntedBug.archetype}\n**Target File:** ${huntedBug.targetFile}`,
+                        url: `https://github.com/${targetOwner}/${targetRepo}`,
+                        author: "AutoHarness-Hunter",
+                        labels: ["latent-bug", huntedBug.archetype],
+                        sourceType: "hunted"
+                    };
+
+                    reproProof = {
+                        command: huntedBug.probeCommand,
+                        failureTrace: huntedBug.failureTrace
+                    };
+
+                    reproResult = {
+                        viable: true,
+                        diff: "",
+                        analysis: huntedBug.description,
+                        affectedFiles: [{ filename: huntedBug.targetFile, status: "modified", additions: 0, deletions: 0, patch: "" }],
+                        repoPath,
+                        localDirName,
+                        prNumber: 0,
+                        fixSummary: huntedBug.title,
+                        reproCommand: huntedBug.probeCommand,
+                        initialFailingTrace: huntedBug.failureTrace
+                    };
+
+                    this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
+                    this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
+                } else {
+                    // Fallback to open issues if hunter didn't prove a latent bug
+                    this.emitPipelineEvent("stage:log", "HUNTER", `No latent bug confirmed via probe test. Falling back to open GitHub issues...`);
+                    const openIssues = await this.github.getOpenBugIssues(targetOwner, targetRepo, 10);
+                    if (openIssues.length === 0) {
+                        throw new Error(`Hunter found no latent bugs and repository has no open bug reports.`);
+                    }
+
+                    const first = openIssues[0];
+                    candidate = {
+                        number: first.number,
+                        pull_number: first.number,
+                        title: first.title,
+                        body: first.body || "",
+                        url: first.html_url,
+                        author: first.user?.login || "unknown",
+                        labels: first.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
+                        sourceType: "issue"
+                    };
+
+                    this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
+
+                    // Viability interview
+                    this.emitPipelineEvent("stage:start", "INTERVIEW", { title: candidate.title });
+                    const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
+                    const isViable = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
+                    if (!isViable) {
+                        throw new Error(`Fallback candidate #${candidate.number} was dropped by viability filter.`);
+                    }
+                    this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: true });
+
+                    this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
+                    reproResult = await analyzeIssueLocally(candidate, this.github, targetOwner, targetRepo);
+                    this.emitPipelineEvent("stage:complete", "ANALYSIS", { analysis: reproResult.analysis });
+
+                    this.emitPipelineEvent("stage:start", "REPRODUCE", { repoPath: reproResult.repoPath });
+                    reproProof = await attemptReproductionProof(candidate, reproResult.repoPath);
+                    if (reproProof) {
+                        this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
+                    }
+                    this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: Boolean(reproProof) });
                 }
             }
-            this.emitPipelineEvent("stage:complete", "DEDUPLICATE", { unique: true });
 
-            // ── Stage 5: Workspace Setup & Issue Analysis ─────────────────
-            this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
-            this.emitPipelineEvent("stage:log", "ANALYSIS", `Cloning repository and analyzing root causes...`);
-            const reproResult = await analyzeIssueLocally(candidate, this.github, targetOwner, targetRepo);
-            if (!reproResult.viable) {
-                throw new Error(`Issue analysis concluded not viable for automated patch.`);
-            }
-            this.emitPipelineEvent("stage:complete", "ANALYSIS", { analysis: reproResult.analysis });
-
-            // ── Stage 6: Breken Proof Protocol (Reproduce First) ──────────
-            this.emitPipelineEvent("stage:start", "REPRODUCE", { repoPath: reproResult.repoPath });
-            this.emitPipelineEvent("stage:log", "REPRODUCE", `Attempting to formulate and execute failing reproduction command...`);
-            const reproProof = await attemptReproductionProof(candidate, reproResult.repoPath);
-
-            if (reproProof) {
-                this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
-                this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: true, command: reproProof.command });
-            } else {
-                this.emitPipelineEvent("stage:log", "REPRODUCE", `Could not automatically trigger isolated failure; proceeding with contextual localization.`);
-                this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: false });
+            if (!reproResult) {
+                throw new Error("Failed to initialize repository workspace.");
             }
 
             // ── Stage 7: Agentless Fault Localization ──────────────────────
             this.emitPipelineEvent("stage:start", "LOCALIZE", { repoPath: reproResult.repoPath });
-            this.emitPipelineEvent("stage:log", "LOCALIZE", `Pinpointing suspect files and function boundaries...`);
-            const localization = await runLocalization(
-                reproResult.repoPath,
-                candidate.title,
-                candidate.body,
-                reproProof?.failureTrace || reproResult.analysis
-            );
+            let localization: LocalizationResult;
+            if (candidate.sourceType === "hunted") {
+                this.emitPipelineEvent("stage:log", "LOCALIZE", `Target boundary verified by BugHunter: ${reproResult.affectedFiles[0].filename}`);
+                localization = {
+                    targetFiles: [reproResult.affectedFiles[0].filename],
+                    likelyFunctions: [],
+                    explanation: candidate.body
+                };
+            } else {
+                this.emitPipelineEvent("stage:log", "LOCALIZE", `Pinpointing suspect files and function boundaries...`);
+                localization = await runLocalization(
+                    reproResult.repoPath,
+                    candidate.title,
+                    candidate.body,
+                    reproProof?.failureTrace || reproResult.analysis
+                );
+            }
             this.emitPipelineEvent("localization:complete", "LOCALIZE", localization);
             this.emitPipelineEvent("stage:complete", "LOCALIZE", localization);
 
@@ -190,6 +271,7 @@ export class PipelineEngine extends EventEmitter {
             this.emitPipelineEvent("stage:start", "STYLE", { repo: options.repo });
             this.emitPipelineEvent("stage:log", "STYLE", `Extracting merge patterns from recent PRs...`);
             const repoStyleGuide = await extractMergePatterns(this.github, targetOwner, targetRepo);
+            const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
             this.emitPipelineEvent("stage:complete", "STYLE", { styleGuide: repoStyleGuide });
 
             // ── Stage 9: Surgical Fixer (agy CLI) ─────────────────────────
@@ -204,7 +286,8 @@ export class PipelineEngine extends EventEmitter {
                 "",
                 localization,
                 accumulatedRules,
-                reproProof
+                reproProof,
+                (msg) => this.emitPipelineEvent("stage:log", "CODEFIX", msg)
             );
 
             if (!codeFix.success || codeFix.modifiedFiles.length === 0) {
@@ -265,7 +348,6 @@ export class PipelineEngine extends EventEmitter {
                 gateApproved = gateResponse.approved;
                 gateNotes = gateResponse.notes;
             } else {
-                // Default auto-approve if no gate handler registered
                 gateApproved = true;
             }
 

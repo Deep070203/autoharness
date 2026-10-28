@@ -3,8 +3,9 @@ import { generateText, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
 import * as path from "path";
 import * as fs from "fs";
+import { execSync } from "node:child_process";
 
-const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
 
 /**
  * Structured result from Stage 5 analysis.
@@ -93,7 +94,7 @@ export async function reproduceCandidateLocally(
                 status: f.status,
                 additions: f.additions,
                 deletions: f.deletions,
-                patch: f.patch,
+                patch: f.patch || "",
             }));
             console.log(`[Analyze] Diff retrieved: ${diff.length} chars, ${prFiles.length} files changed`);
         } catch (e: any) {
@@ -309,20 +310,32 @@ REPRO_COMMAND: NONE
             return undefined;
         }
 
-        const command = match[1].trim().replace(/^`/, "").replace(/`$/, "");
+        let command = match[1].trim().replace(/^`/, "").replace(/`$/, "");
+        if (command.startsWith("python ")) {
+            command = command.replace(/^python /, "python3 ");
+        }
         console.log(`[Proof Protocol] Executing candidate repro: ${command}`);
 
-        const { execSync } = require("child_process");
+        const execEnv = {
+            ...process.env,
+            CI: "true",
+            PATH: `${process.env.HOME}/.local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:${process.env.PATH || ""}`,
+        };
+
         try {
             execSync(command, {
                 cwd: repoPath,
                 encoding: "utf-8",
                 timeout: 45_000,
-                env: { ...process.env, CI: "true" }
+                env: execEnv
             });
             console.log(`[Proof Protocol] Repro command passed unexpectedly (exit 0). Proof not confirmed.`);
             return undefined;
         } catch (err: any) {
+            if (err.status === 127 || err.message.includes("command not found")) {
+                console.warn(`[Proof Protocol] Candidate repro failed because binary was not found: ${err.message}`);
+                return undefined;
+            }
             const failureTrace = (err.stdout || err.stderr || err.message).substring(0, 2000);
             console.log(`[Proof Protocol] 🎯 Confirmed failing reproduction (exit ${err.status || 1})!`);
             return {

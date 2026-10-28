@@ -8,18 +8,20 @@ dotenv.config();
 
 export class GitHubService {
     public octokit: Octokit;
+    private unauthOctokit: Octokit;
     private git: SimpleGit;
     public baseDir: string;
 
     constructor(baseDir: string = "/Users/deepshah/Downloads/PRs") {
         const token = process.env.GITHUB_TOKEN;
         if (!token) {
-            console.warn("GITHUB_TOKEN not found in environment variables. API calls will be unauthenticated and severely rate-limited.");
+            console.warn("[GitHub] GITHUB_TOKEN not found in environment variables. API calls will be unauthenticated.");
         }
 
         this.octokit = new Octokit({
-            auth: token,
+            auth: token && token.trim().length > 10 ? token.trim() : undefined,
         });
+        this.unauthOctokit = new Octokit();
 
         this.baseDir = path.resolve(baseDir);
         if (!fs.existsSync(this.baseDir)) {
@@ -33,57 +35,79 @@ export class GitHubService {
             trimmed: false,
         };
         // @ts-ignore Let it fall back if typical esm import fails
-        this.git = typeof simpleGit === 'function' ? simpleGit(options) : (simpleGit as any).default(options);
+        this.git = typeof simpleGit === "function" ? simpleGit(options) : (simpleGit as any).default(options);
+    }
+
+    /**
+     * Executes an Octokit API call with automatic fallback to unauthenticated client if token is expired/invalid (401).
+     */
+    private async callApi<T>(fn: (client: Octokit) => Promise<T>): Promise<T> {
+        try {
+            return await fn(this.octokit);
+        } catch (err: any) {
+            if (err?.status === 401 || err?.message?.includes("Bad credentials")) {
+                console.warn("[GitHub] Token rejected (401 Bad credentials). Falling back to unauthenticated public API call...");
+                return await fn(this.unauthOctokit);
+            }
+            throw err;
+        }
     }
 
     /**
      * Gets the last N merged PRs for a repository
      */
     async getRecentMergedPRs(owner: string, repo: string, limit: number = 20) {
-        const response = await this.octokit.search.issuesAndPullRequests({
-            q: `repo:${owner}/${repo} is:pr is:merged`,
-            sort: "updated",
-            order: "desc",
-            per_page: limit,
+        return this.callApi(async (client) => {
+            const response = await client.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:pr is:merged`,
+                sort: "updated",
+                order: "desc",
+                per_page: limit,
+            });
+            return response.data.items;
         });
-        return response.data.items;
     }
 
     /**
      * Gets open issues that look like bug reports
      */
     async getOpenBugIssues(owner: string, repo: string, limit: number = 20) {
-        const response = await this.octokit.search.issuesAndPullRequests({
-            q: `repo:${owner}/${repo} is:issue is:open`,
-            sort: "updated",
-            order: "desc",
-            per_page: limit,
+        return this.callApi(async (client) => {
+            const response = await client.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:issue is:open`,
+                sort: "updated",
+                order: "desc",
+                per_page: limit,
+            });
+            return response.data.items.filter((item: any) => !item.pull_request);
         });
-        // Filter out pull requests (GitHub search returns both)
-        return response.data.items.filter((item: any) => !item.pull_request);
     }
 
     /**
      * Gets a specific issue by its number
      */
     async getIssue(owner: string, repo: string, issueNumber: number) {
-        const response = await this.octokit.issues.get({
-            owner,
-            repo,
-            issue_number: issueNumber,
+        return this.callApi(async (client) => {
+            const response = await client.issues.get({
+                owner,
+                repo,
+                issue_number: issueNumber,
+            });
+            return response.data;
         });
-        return response.data;
     }
 
     /**
      * Forks a repository and returns the fork details
      */
     async forkRepository(owner: string, repo: string) {
-        const response = await this.octokit.repos.createFork({
-            owner,
-            repo,
+        return this.callApi(async (client) => {
+            const response = await client.repos.createFork({
+                owner,
+                repo,
+            });
+            return response.data;
         });
-        return response.data;
     }
 
     /**
@@ -94,99 +118,89 @@ export class GitHubService {
         if (fs.existsSync(targetDir)) {
             console.log(`Repository already exists at ${targetDir}`);
             // @ts-ignore
-            return typeof simpleGit === 'function' ? simpleGit(targetDir) : (simpleGit as any).default(targetDir);
+            return typeof simpleGit === "function" ? simpleGit(targetDir) : (simpleGit as any).default(targetDir);
         }
         await this.git.clone(repoUrl, localFolderName);
         // @ts-ignore
-        return typeof simpleGit === 'function' ? simpleGit(targetDir) : (simpleGit as any).default(targetDir);
+        return typeof simpleGit === "function" ? simpleGit(targetDir) : (simpleGit as any).default(targetDir);
     }
 
     /**
      * Gets the unified diff of a specific pull request
      */
     async getPRDiff(owner: string, repo: string, pullNumber: number): Promise<string> {
-        const response = await this.octokit.pulls.get({
-            owner,
-            repo,
-            pull_number: pullNumber,
-            mediaType: { format: 'diff' }
+        return this.callApi(async (client) => {
+            const response = await client.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                mediaType: {
+                    format: "diff",
+                },
+            });
+            return response.data as unknown as string;
         });
-        // When format is 'diff', response.data is a string
-        return response.data as unknown as string;
     }
 
     /**
-     * Gets the list of files changed in a pull request with patch hunks
+     * Gets the list of files changed in a PR
      */
     async getPRFiles(owner: string, repo: string, pullNumber: number) {
-        const response = await this.octokit.pulls.listFiles({
-            owner,
-            repo,
-            pull_number: pullNumber,
-            per_page: 100,
+        return this.callApi(async (client) => {
+            const response = await client.pulls.listFiles({
+                owner,
+                repo,
+                pull_number: pullNumber,
+            });
+            return response.data;
         });
-        return response.data.map(f => ({
-            filename: f.filename,
-            status: f.status,
-            additions: f.additions,
-            deletions: f.deletions,
-            patch: f.patch || '',
-        }));
     }
 
     /**
-     * Gets the default branch name for a repository (not always 'main')
-     */
-    async getDefaultBranch(owner: string, repo: string): Promise<string> {
-        const { data } = await this.octokit.repos.get({ owner, repo });
-        return data.default_branch;
-    }
-
-    /**
-     * Gets full PR details (title, body, author, labels, merge commit)
+     * Gets the full details of a pull request
      */
     async getPRDetails(owner: string, repo: string, pullNumber: number) {
-        const { data } = await this.octokit.pulls.get({
-            owner,
-            repo,
-            pull_number: pullNumber,
+        return this.callApi(async (client) => {
+            const response = await client.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber,
+            });
+            return response.data;
         });
-        return {
-            title: data.title,
-            body: data.body || '',
-            author: data.user?.login || 'unknown',
-            labels: data.labels.map((l: any) => l.name),
-            mergeCommitSha: data.merge_commit_sha,
-            baseBranch: data.base.ref,
-            headBranch: data.head.ref,
-        };
     }
 
     /**
-     * Fetches the CONTRIBUTING.md file if it exists
+     * Gets the default branch of a repository
+     */
+    async getDefaultBranch(owner: string, repo: string): Promise<string> {
+        return this.callApi(async (client) => {
+            const response = await client.repos.get({
+                owner,
+                repo,
+            });
+            return response.data.default_branch;
+        });
+    }
+
+    /**
+     * Fetches the repo's CONTRIBUTING.md guidelines if present
      */
     async getContributingGuidelines(owner: string, repo: string): Promise<string | null> {
-        try {
-            const possiblePaths = ['CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'docs/CONTRIBUTING.md'];
-            for (const p of possiblePaths) {
-                try {
-                    const response = await this.octokit.repos.getContent({
-                        owner,
-                        repo,
-                        path: p,
-                    });
-
-                    if ('content' in response.data && 'encoding' in response.data) {
-                        return Buffer.from(response.data.content, response.data.encoding as BufferEncoding).toString('utf-8');
-                    }
-                } catch (e: any) {
-                    if (e.status !== 404) throw e;
-                }
+        return this.callApi(async (client) => {
+            try {
+                const response = await client.repos.getContent({
+                    owner,
+                    repo,
+                    path: "CONTRIBUTING.md",
+                    mediaType: {
+                        format: "raw",
+                    },
+                });
+                return response.data as unknown as string;
+            } catch (e) {
+                return null;
             }
-            return null;
-        } catch (error) {
-            console.error(`Error fetching CONTRIBUTING.md for ${owner}/${repo}:`, error);
-            return null;
-        }
+        });
     }
 }

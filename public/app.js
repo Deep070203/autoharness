@@ -8,6 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const similarPrInput = document.getElementById("similar-pr-input");
     const similarIssueInput = document.getElementById("similar-issue-input");
     const btnStart = document.getElementById("btn-start");
+    const btnHunt = document.getElementById("btn-hunt");
     
     const statusPill = document.getElementById("status-pill");
     const statusText = document.getElementById("status-text");
@@ -130,7 +131,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // Node Graph Manager
     const nodeIds = ["SCOUT", "INTERVIEW", "REPRODUCE", "LOCALIZE", "CODEFIX", "VERIFY", "GATE"];
     function setNodeStatus(stageName, state, statusText) {
-        const node = document.getElementById(`node-${stageName}`);
+        const mappedId = stageName === "HUNTER" ? "SCOUT" : stageName;
+        const node = document.getElementById(`node-${mappedId}`);
         if (!node) return;
 
         node.classList.remove("active", "completed", "failed");
@@ -308,6 +310,13 @@ document.addEventListener("DOMContentLoaded", () => {
             updateStatus("IDLE");
         }
     });
+
+    if (btnHunt) {
+        btnHunt.addEventListener("click", () => {
+            issueInput.value = "";
+            form.dispatchEvent(new Event("submit"));
+        });
+    }
 
     // Human Gate Handlers
     btnGateApprove.addEventListener("click", async () => {

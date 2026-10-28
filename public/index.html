@@ -69,9 +69,14 @@
 
                         <div class="form-group btn-col">
                             <label>&nbsp;</label>
-                            <button type="submit" id="btn-start" class="btn-primary">
-                                <span class="btn-icon">⚡</span> Start Autonomous Run
-                            </button>
+                            <div class="btn-group">
+                                <button type="submit" id="btn-start" class="btn-primary">
+                                    <span class="btn-icon">⚡</span> Run Pipeline
+                                </button>
+                                <button type="button" id="btn-hunt" class="btn-secondary" title="Scan code for latent bugs without an issue number">
+                                    <span class="btn-icon">🎯</span> Hunt Latent Bugs
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -103,7 +108,7 @@
                     <div class="node" id="node-SCOUT">
                         <div class="node-icon">🔍</div>
                         <div class="node-info">
-                            <span class="node-label">1. Scout</span>
+                            <span class="node-label">1. Scout / Hunter</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>

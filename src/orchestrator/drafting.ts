@@ -6,7 +6,7 @@ import type { VerificationResult } from "./verify.js";
 import type { BehavioralMemory } from "../utils/memory.js";
 import * as readline from "readline";
 
-const MODEL: LanguageModel = google("gemini-3.5-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
 
 export interface ProofContext {
     reproCommand?: string;

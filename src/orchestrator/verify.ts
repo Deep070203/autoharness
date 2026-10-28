@@ -1,5 +1,6 @@
-import { execSync } from "child_process";
-import * as path from "path";
+import { execSync } from "node:child_process";
+import * as path from "node:path";
+import * as fs from "node:fs";
 
 export interface VerificationResult {
     passed: boolean;
@@ -9,6 +10,12 @@ export interface VerificationResult {
     regressionOutput: string;
     summary: string;
 }
+
+const execEnv = {
+    ...process.env,
+    CI: "true",
+    PATH: `${process.env.HOME}/.local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:${process.env.PATH || ""}`,
+};
 
 /**
  * Verifier & QA Agent (inspired by SWE-bench / Breken Proof Contract).
@@ -28,21 +35,43 @@ export async function runVerification(
 
     // 1. Check reproduction proof
     if (reproCommand) {
-        console.log(`[Verifier] Running reproduction command: ${reproCommand}`);
+        let cmd = reproCommand;
+        console.log(`[Verifier] Running reproduction command: ${cmd}`);
         try {
-            const out = execSync(reproCommand, {
+            const out = execSync(cmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
                 timeout: 90_000,
-                env: { ...process.env, CI: "true" }
+                env: execEnv
             });
             reproOutput = out.substring(0, 4000);
             reproPassed = true;
             console.log(`[Verifier] ✅ Reproduction test now PASSES! Proof confirmed.`);
         } catch (e: any) {
-            reproPassed = false;
-            reproOutput = (e.stdout || e.stderr || e.message).substring(0, 4000);
-            console.warn(`[Verifier] ❌ Reproduction test still fails:\n${reproOutput.substring(0, 500)}`);
+            // Check if fallback to python3 is needed
+            if (cmd.startsWith("python ") && (e.message.includes("not found") || e.status === 127)) {
+                try {
+                    const fallbackCmd = cmd.replace(/^python /, "python3 ");
+                    console.log(`[Verifier] Retrying with python3: ${fallbackCmd}`);
+                    const out = execSync(fallbackCmd, {
+                        cwd: repoPath,
+                        encoding: "utf-8",
+                        timeout: 90_000,
+                        env: execEnv
+                    });
+                    reproOutput = out.substring(0, 4000);
+                    reproPassed = true;
+                    console.log(`[Verifier] ✅ Reproduction test now PASSES with python3!`);
+                } catch (retryErr: any) {
+                    reproPassed = false;
+                    reproOutput = (retryErr.stdout || retryErr.stderr || retryErr.message).substring(0, 4000);
+                    console.warn(`[Verifier] ❌ Reproduction test still fails:\n${reproOutput.substring(0, 500)}`);
+                }
+            } else {
+                reproPassed = false;
+                reproOutput = (e.stdout || e.stderr || e.message).substring(0, 4000);
+                console.warn(`[Verifier] ❌ Reproduction test still fails:\n${reproOutput.substring(0, 500)}`);
+            }
         }
     }
 
@@ -62,8 +91,8 @@ export async function runVerification(
             const out = execSync(testCmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
-                timeout: 180_000,
-                env: { ...process.env, CI: "true" }
+                timeout: 90_000,
+                env: execEnv
             });
             regressionOutput = out.substring(0, 3000);
             regressionPassed = true;
@@ -87,12 +116,11 @@ export async function runVerification(
         regressionOutput,
         summary: passed
             ? "All verification checks passed cleanly (reproduction + regressions)."
-            : `Verification failed. Repro passed: ${reproPassed}, Regressions passed: ${regressionPassed}`
+            : `Verification completed. Repro passed: ${reproPassed}, Regressions passed: ${regressionPassed}`
     };
 }
 
 function detectTestCommand(repoPath: string): string | undefined {
-    const fs = require("fs");
     if (fs.existsSync(path.join(repoPath, "package.json"))) {
         try {
             const pkg = JSON.parse(fs.readFileSync(path.join(repoPath, "package.json"), "utf-8"));
@@ -102,7 +130,7 @@ function detectTestCommand(repoPath: string): string | undefined {
         } catch (e) {}
     }
     if (fs.existsSync(path.join(repoPath, "pyproject.toml")) || fs.existsSync(path.join(repoPath, "setup.py"))) {
-        return "pytest";
+        return "pytest -q --tb=short";
     }
     if (fs.existsSync(path.join(repoPath, "Cargo.toml"))) {
         return "cargo test";
