@@ -6,7 +6,7 @@
     <title>AutoHarness — Autonomous Issue Resolver & Proof Engine</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,30 +15,37 @@
         <!-- Top Navbar -->
         <header class="topbar">
             <div class="brand">
-                <div class="brand-icon">⚡</div>
+                <div class="brand-icon">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    </svg>
+                </div>
                 <div class="brand-text">
-                    <span class="brand-title">AutoHarness</span>
-                    <span class="brand-subtitle">Autonomous Issue Resolver & Proof Engine</span>
+                    <div class="brand-title-wrap">
+                        <span class="brand-title">AutoHarness</span>
+                        <span class="version-tag">ENGINE</span>
+                    </div>
+                    <span class="brand-subtitle">Autonomous Proof-First Issue Resolver</span>
                 </div>
             </div>
 
             <div class="topbar-center">
                 <div class="breken-banner">
                     <span class="pulse-dot"></span>
-                    <span class="banner-text">Proves each bug before opening a pull request</span>
+                    <span class="banner-text">Breken Standard • Deterministic Proof Before PR</span>
                 </div>
             </div>
 
             <div class="topbar-actions">
                 <button id="btn-open-vault" class="btn-ghost" title="View Proposal & Patch Vault (OS ~/.autoharness)">
-                    <span class="icon">📦</span> Patch Vault
+                    <span class="icon">▤</span> Patch Vault
                 </button>
-                <button id="btn-open-memory" class="btn-ghost" title="View Persistent Behavioral Rules (arXiv:2607.13091)">
-                    <span class="icon">🧠</span> Behavioral Memory
+                <button id="btn-open-memory" class="btn-ghost" title="View Persistent Behavioral Rules">
+                    <span class="icon">⌘</span> Behavioral Rules
                 </button>
                 <div id="status-pill" class="status-pill status-idle">
                     <span class="status-indicator"></span>
-                    <span id="status-text">SYSTEM IDLE</span>
+                    <span id="status-text">STANDBY</span>
                 </div>
             </div>
         </header>
@@ -47,37 +54,36 @@
         <main class="main-content">
             <!-- Hero / Configuration Section -->
             <section class="config-card">
-                <div class="card-header">
-                    <h2>🎯 Target Repository & Task</h2>
-                    <span class="hint">Specify an OSS repo and issue, or run in autonomous hunter mode.</span>
-                </div>
-
                 <form id="pipeline-form" class="config-form">
                     <div class="input-row">
                         <div class="form-group flex-2">
-                            <label for="repo-input">Target Repository (owner/repo)</label>
-                            <input type="text" id="repo-input" name="repo" placeholder="e.g. posthog/posthog-js" value="semantica-agi/semantica" required>
-                            <div class="quick-chips">
-                                <span class="chip" data-repo="posthog/posthog-js">posthog-js</span>
-                                <span class="chip" data-repo="supabase/realtime">supabase/realtime</span>
-                                <span class="chip" data-repo="getsentry/sentry-go">sentry-go</span>
-                                <span class="chip" data-repo="semantica-agi/semantica">semantica</span>
+                            <div class="label-row">
+                                <label for="repo-input">Target Repository (owner/repo)</label>
+                                <div class="quick-chips">
+                                    <span class="chip" data-repo="posthog/posthog-js">posthog-js</span>
+                                    <span class="chip" data-repo="supabase/realtime">supabase/realtime</span>
+                                    <span class="chip" data-repo="getsentry/sentry-go">sentry-go</span>
+                                    <span class="chip" data-repo="semantica-agi/semantica">semantica</span>
+                                </div>
                             </div>
+                            <input type="text" id="repo-input" name="repo" placeholder="e.g. posthog/posthog-js" value="semantica-agi/semantica" required>
                         </div>
 
                         <div class="form-group flex-1">
-                            <label for="issue-input">Issue # (leave blank to hunt)</label>
-                            <input type="number" id="issue-input" name="issue" placeholder="e.g. 5121">
+                            <label for="issue-input">Issue # <span class="label-hint">(optional — blank to hunt)</span></label>
+                            <input type="number" id="issue-input" name="issue" placeholder="Auto-hunt if empty">
                         </div>
 
                         <div class="form-group btn-col">
                             <label>&nbsp;</label>
                             <div class="btn-group">
-                                <button type="submit" id="btn-start" class="btn-primary">
-                                    <span class="btn-icon">⚡</span> Run Pipeline
+                                <button type="submit" id="btn-start" class="btn-primary" title="Run full autonomous pipeline on target issue">
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                                    Run Pipeline
                                 </button>
                                 <button type="button" id="btn-hunt" class="btn-secondary" title="Scan code for latent bugs without an issue number">
-                                    <span class="btn-icon">🎯</span> Hunt Latent Bugs
+                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                                    Hunt Latent Bugs
                                 </button>
                             </div>
                         </div>
@@ -85,7 +91,7 @@
 
                     <!-- Collapsible Advanced Guidance -->
                     <details class="advanced-details">
-                        <summary>Advanced Guidance Context (Optional Similar Reference)</summary>
+                        <summary>Advanced Reference Guidance (Optional Context)</summary>
                         <div class="input-row sub-row">
                             <div class="form-group">
                                 <label for="similar-pr-input">Reference PR # (Pattern Guidance)</label>
@@ -103,69 +109,69 @@
             <!-- Visual Pipeline Task Graph -->
             <section class="pipeline-graph-section">
                 <div class="section-title-row">
-                    <h3>Multi-Role Task Graph</h3>
+                    <span class="stepper-title">Autonomous Pipeline Stages</span>
                     <span id="elapsed-time" class="timer-badge">Elapsed: 00:00</span>
                 </div>
 
                 <div class="graph-nodes">
                     <div class="node" id="node-SCOUT">
-                        <div class="node-icon">🔍</div>
+                        <div class="node-badge">01</div>
                         <div class="node-info">
-                            <span class="node-label">1. Scout / Hunter</span>
+                            <span class="node-label">Scout / Hunter</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-INTERVIEW">
-                        <div class="node-icon">🛡️</div>
+                        <div class="node-badge">02</div>
                         <div class="node-info">
-                            <span class="node-label">2. Viability</span>
+                            <span class="node-label">Viability</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-REPRODUCE">
-                        <div class="node-icon">🧪</div>
+                        <div class="node-badge">03</div>
                         <div class="node-info">
-                            <span class="node-label">3. Proof Protocol</span>
+                            <span class="node-label">Proof Protocol</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-LOCALIZE">
-                        <div class="node-icon">🎯</div>
+                        <div class="node-badge">04</div>
                         <div class="node-info">
-                            <span class="node-label">4. Localizer</span>
+                            <span class="node-label">Localization</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-CODEFIX">
-                        <div class="node-icon">🔧</div>
+                        <div class="node-badge">05</div>
                         <div class="node-info">
-                            <span class="node-label">5. Fixer (agy)</span>
+                            <span class="node-label">Fix Engine</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-VERIFY">
-                        <div class="node-icon">✅</div>
+                        <div class="node-badge">06</div>
                         <div class="node-info">
-                            <span class="node-label">6. QA Verifier</span>
+                            <span class="node-label">QA Verifier</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
                     <div class="node-connector"></div>
 
                     <div class="node" id="node-GATE">
-                        <div class="node-icon">🛑</div>
+                        <div class="node-badge">07</div>
                         <div class="node-info">
-                            <span class="node-label">7. Human Gate</span>
+                            <span class="node-label">Review Gate</span>
                             <span class="node-status">Waiting</span>
                         </div>
                     </div>
@@ -203,7 +209,6 @@
                             ✕ Reject with Feedback
                         </button>
                     </div>
-                </div>
             </section>
 
             <!-- Workspace: Left Log Stream, Right Proof & Diff Inspector -->
@@ -307,6 +312,22 @@
                 </div>
             </div>
         </main>
+
+        <!-- Pinned Developer Workbench Footer -->
+        <footer class="app-footer">
+            <div class="footer-left">
+                <span class="footer-item"><span class="footer-dot live"></span> Engine: Standby</span>
+                <span class="footer-sep">/</span>
+                <span class="footer-item" id="footer-memory-scope">Repo Memory: Isolated (~/.autoharness)</span>
+                <span class="footer-sep">/</span>
+                <span class="footer-item">Protocol: Breken Proof-First</span>
+            </div>
+            <div class="footer-right">
+                <span class="footer-item" id="footer-agent-info">Agent: gemini-2.5-flash</span>
+                <span class="footer-sep">/</span>
+                <span class="footer-item">v0.2.0-bench</span>
+            </div>
+        </footer>
     </div>
 
     <!-- Modal: Proposal & Patch Vault (OS ~/.autoharness) -->
