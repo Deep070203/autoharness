@@ -251,7 +251,7 @@ Apply a minimal, surgical fix to ${blackboard.hunter.targetFile} so that \`${bla
             try {
                 const targetSrc = fs.readFileSync(absTarget, "utf-8");
                 userPrompt += `\n\n### Target File Content (${blackboard.hunter.targetFile}):\n\`\`\`\n${targetSrc.length > 20000 ? targetSrc.substring(0, 20000) + "\n...[truncated]" : targetSrc}\n\`\`\``;
-            } catch (e) {}
+            } catch (e) { }
         }
     } else if (localization && localization.targetFiles.length > 0) {
         userPrompt += `\n\n### Fault Localization
@@ -266,7 +266,7 @@ Rationale: ${localization.explanation}`;
                     const content = fs.readFileSync(abs, "utf-8");
                     const snippet = content.length > 15000 ? content.substring(0, 15000) + "\n...[truncated]" : content;
                     userPrompt += `\n\n### File Content: ${relFile}\n\`\`\`\n${snippet}\n\`\`\``;
-                } catch (e) {}
+                } catch (e) { }
             }
         }
     }
@@ -318,7 +318,7 @@ Apply the patch using patch_file immediately and verify with run_shell.`;
                     modifiedFilesSet.add(match[2].trim());
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
 
         const modifiedFiles = Array.from(modifiedFilesSet);
         const summary = summaryMatch?.[1]?.trim() || out.substring(0, 300) || "Code fix applied.";

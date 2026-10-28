@@ -23,3 +23,4 @@ extra/
 outputs/
 output/
 workspace/
+.autoharness/

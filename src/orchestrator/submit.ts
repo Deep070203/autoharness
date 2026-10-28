@@ -2,11 +2,18 @@ import { GitHubService } from "../utils/github.js";
 import simpleGit from "simple-git";
 import * as path from "path";
 
+export interface SubmissionResult {
+    prUrl: string;
+    issueUrl?: string;
+    issueNumber?: number;
+}
+
 /**
- * Stage 13: Submission and Follow-up
+ * Stage 13: Submission and Follow-up (Two-Phase Issue & PR Creation)
  *
- * Commits the actual file changes made by the coding agent,
- * pushes to the fork, and opens a PR against upstream.
+ * 1. If issueDraft is provided (e.g. for hunted latent bugs), opens a GitHub Issue first.
+ * 2. Injects 'Fixes #<number>' into the PR draft.
+ * 3. Commits the surgical file changes, pushes to fork, and opens the PR.
  */
 export async function submitPullRequest(
     github: GitHubService,
@@ -16,12 +23,37 @@ export async function submitPullRequest(
     localDirName: string,
     modifiedFiles: string[],
     baseBranch?: string,
-): Promise<string | null> {
+    issueDraft?: { title: string; body: string; labels?: string[] },
+    requiresDCO?: boolean
+): Promise<SubmissionResult | null> {
     console.log(`\n🚀 Stage 13: Submission to ${owner}/${repo}`);
 
     const repoPath = path.join(github.baseDir, localDirName);
 
     try {
+        let createdIssue: { number: number; html_url: string } | undefined;
+
+        // ── Phase 1: Create GitHub Issue first if hunted bug ──────────
+        if (issueDraft) {
+            console.log(`[Submit] Phase 1: Filing style-matched GitHub Issue: "${issueDraft.title}"...`);
+            try {
+                createdIssue = await github.createIssue(
+                    owner,
+                    repo,
+                    issueDraft.title,
+                    issueDraft.body,
+                    issueDraft.labels || ["bug"]
+                );
+                console.log(`[Submit] ✅ Phase 1 Complete: Created Issue #${createdIssue.number} (${createdIssue.html_url})`);
+
+                // Link PR to the newly filed issue
+                draft.body = `${draft.body}\n\nFixes #${createdIssue.number}\nCloses #${createdIssue.number}`;
+            } catch (err: any) {
+                console.warn(`[Submit] Warning: Failed to create GitHub issue: ${err.message}. Proceeding directly with PR.`);
+            }
+        }
+
+        // ── Phase 2: Git Commit, Push & PR Creation ──────────────────
         // @ts-ignore
         const git = typeof simpleGit === 'function' ? simpleGit(repoPath) : (simpleGit as any).default(repoPath);
 
@@ -56,9 +88,13 @@ export async function submitPullRequest(
             await git.add(file);
         }
 
-        // Commit
-        console.log(`[Submit] Committing...`);
-        await git.commit(draft.title);
+        // Commit (with DCO Signed-off-by if repository requires DCO)
+        console.log(`[Submit] Committing${requiresDCO ? " (with DCO signoff)" : ""}...`);
+        if (requiresDCO) {
+            await git.commit(draft.title, { '--signoff': null });
+        } else {
+            await git.commit(draft.title);
+        }
 
         // Verify the commit has changes
         const log = await git.log({ maxCount: 1 });
@@ -83,8 +119,12 @@ export async function submitPullRequest(
             base: baseBranch,
         });
 
-        console.log(`[Submit] ✅ PR created: ${pr.data.html_url}`);
-        return pr.data.html_url;
+        console.log(`[Submit] ✅ Phase 2 Complete: PR created: ${pr.data.html_url}`);
+        return {
+            prUrl: pr.data.html_url,
+            issueUrl: createdIssue?.html_url,
+            issueNumber: createdIssue?.number,
+        };
 
     } catch (e: any) {
         console.error(`[Submit] Submission failed: ${e.message}`);

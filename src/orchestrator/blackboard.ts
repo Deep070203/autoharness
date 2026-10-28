@@ -68,6 +68,15 @@ export interface TaskBlackboard {
         summary: string;
     };
 
+    /** Style-Matched Issue Draft (for hunted bugs) */
+    issueDraft?: {
+        title: string;
+        body: string;
+        labels?: string[];
+        issueNumber?: number;
+        issueUrl?: string;
+    };
+
     /** PR Draft and Submission */
     draft?: {
         title: string;
@@ -76,3 +85,4 @@ export interface TaskBlackboard {
         prUrl?: string;
     };
 }
+

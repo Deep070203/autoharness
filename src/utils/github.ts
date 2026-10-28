@@ -84,6 +84,25 @@ export class GitHubService {
     }
 
     /**
+     * Gets recent bug issues (open or closed) to analyze issue style conventions
+     */
+    async getRecentBugIssues(owner: string, repo: string, limit: number = 10) {
+        return this.callApi(async (client) => {
+            try {
+                const response = await client.search.issuesAndPullRequests({
+                    q: `repo:${owner}/${repo} is:issue`,
+                    sort: "created",
+                    order: "desc",
+                    per_page: limit,
+                });
+                return response.data.items.filter((item: any) => !item.pull_request);
+            } catch (e) {
+                return [];
+            }
+        });
+    }
+
+    /**
      * Gets a specific issue by its number
      */
     async getIssue(owner: string, repo: string, issueNumber: number) {
@@ -94,6 +113,25 @@ export class GitHubService {
                 issue_number: issueNumber,
             });
             return response.data;
+        });
+    }
+
+    /**
+     * Creates a new issue in the target repository
+     */
+    async createIssue(owner: string, repo: string, title: string, body: string, labels: string[] = ["bug"]): Promise<{ number: number; html_url: string }> {
+        return this.callApi(async (client) => {
+            const response = await client.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+                labels,
+            });
+            return {
+                number: response.data.number,
+                html_url: response.data.html_url,
+            };
         });
     }
 
@@ -184,15 +222,15 @@ export class GitHubService {
     }
 
     /**
-     * Fetches the repo's CONTRIBUTING.md guidelines if present
+     * Fetches raw content of a specific file in the repository if it exists
      */
-    async getContributingGuidelines(owner: string, repo: string): Promise<string | null> {
+    async getFileContent(owner: string, repo: string, filePath: string): Promise<string | null> {
         return this.callApi(async (client) => {
             try {
                 const response = await client.repos.getContent({
                     owner,
                     repo,
-                    path: "CONTRIBUTING.md",
+                    path: filePath,
                     mediaType: {
                         format: "raw",
                     },
@@ -201,6 +239,70 @@ export class GitHubService {
             } catch (e) {
                 return null;
             }
+        });
+    }
+
+    /**
+     * Fetches the repo's CONTRIBUTING guidelines across common locations
+     */
+    async getContributingGuidelines(owner: string, repo: string): Promise<string | null> {
+        const candidatePaths = [
+            "CONTRIBUTING.md",
+            ".github/CONTRIBUTING.md",
+            "docs/CONTRIBUTING.md",
+            ".github/contributing.md",
+            "contributing.md"
+        ];
+        for (const p of candidatePaths) {
+            const content = await this.getFileContent(owner, repo, p);
+            if (content) return content;
+        }
+        return null;
+    }
+
+    /**
+     * Fetches the official PR template if present
+     */
+    async getPullRequestTemplate(owner: string, repo: string): Promise<string | null> {
+        const candidatePaths = [
+            ".github/PULL_REQUEST_TEMPLATE.md",
+            ".github/pull_request_template.md",
+            "PULL_REQUEST_TEMPLATE.md",
+            "pull_request_template.md",
+            ".github/PULL_REQUEST_TEMPLATE/pull_request_template.md"
+        ];
+        for (const p of candidatePaths) {
+            const content = await this.getFileContent(owner, repo, p);
+            if (content) return content;
+        }
+        return null;
+    }
+
+    /**
+     * Fetches official issue template (preferring bug reports) if present
+     */
+    async getIssueTemplates(owner: string, repo: string): Promise<{ filename: string; content: string }[]> {
+        return this.callApi(async (client) => {
+            try {
+                const response = await client.repos.getContent({
+                    owner,
+                    repo,
+                    path: ".github/ISSUE_TEMPLATE",
+                });
+                if (Array.isArray(response.data)) {
+                    const templates: { filename: string; content: string }[] = [];
+                    for (const item of response.data) {
+                        if (item.type === "file" && (item.name.endsWith(".md") || item.name.endsWith(".yml") || item.name.endsWith(".yaml"))) {
+                            const content = await this.getFileContent(owner, repo, item.path);
+                            if (content) {
+                                templates.push({ filename: item.name, content });
+                            }
+                        }
+                    }
+                    return templates;
+                }
+            } catch (e) {}
+            return [];
         });
     }
 }

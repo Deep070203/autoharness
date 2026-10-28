@@ -193,6 +193,28 @@ app.post("/api/rules", (req: Request, res: Response) => {
     res.json({ success: true, message: "Rule stored in behavioral memory." });
 });
 
+// 6. Proposal & Patch Vault
+app.get("/api/proposals", (req: Request, res: Response) => {
+    const repoStr = req.query.repo as string;
+    if (!repoStr || !repoStr.includes("/")) {
+        return res.status(400).json({ error: "Missing or invalid 'repo' query param (owner/repo)." });
+    }
+    const [owner, repo] = repoStr.split("/");
+    const proposals = memory.getProposals(owner, repo);
+    res.json({ proposals });
+});
+
+app.get("/api/proposals/:owner/:repo/:id", (req: Request, res: Response) => {
+    const owner = String(req.params.owner);
+    const repo = String(req.params.repo);
+    const id = String(req.params.id);
+    const proposal = memory.getProposal(owner, repo, id);
+    if (!proposal) {
+        return res.status(404).json({ error: "Proposal not found in vault." });
+    }
+    res.json(proposal);
+});
+
 app.listen(PORT, () => {
     console.log(`\n🚀 AutoHarness Control Center live at http://localhost:${PORT}`);
     console.log(`   Interactive Web Dashboard: http://localhost:${PORT}`);

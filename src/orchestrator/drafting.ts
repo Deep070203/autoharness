@@ -14,6 +14,113 @@ export interface ProofContext {
     verification?: VerificationResult;
 }
 
+export interface IssueDraft {
+    title: string;
+    body: string;
+    labels?: string[];
+}
+
+/**
+ * Drafts a style-matched GitHub Issue for an autonomously hunted latent bug.
+ * Samples recent issues from the target repository to match tone, headings, and structure.
+ */
+export async function draftIssueForHuntedBug(
+    candidate: any,
+    github: GitHubService,
+    owner: string,
+    repo: string,
+    proof?: ProofContext,
+    issueTemplate?: string
+): Promise<IssueDraft> {
+    console.log(`\n📋 Drafting Style-Matched GitHub Issue for: ${candidate.title}`);
+
+    // Sample recent bug issues to learn conventions if no official template
+    let sampleIssueConventions = "";
+    if (!issueTemplate) {
+        try {
+            const samples = await github.getRecentBugIssues(owner, repo, 5);
+            if (samples && samples.length > 0) {
+                sampleIssueConventions = samples.map((s, idx) => {
+                    const title = s.title;
+                    const bodyExcerpt = (s.body || "").substring(0, 500);
+                    return `### Issue Sample #${idx + 1}: "${title}"\n${bodyExcerpt}\n`;
+                }).join("\n---\n");
+            }
+        } catch (e) {}
+    }
+
+    const templatePrompt = issueTemplate ? `
+### Official Repository Bug Template (You MUST fill out this exact template structure):
+\`\`\`markdown
+${issueTemplate}
+\`\`\`
+Instructions:
+1. Retain all section headers, checklists, and structure from the official template above.
+2. Fill in the bug details, steps to reproduce, and environment accurately.
+` : `
+### Formatting Samples from Recent Accepted Bug Reports:
+${sampleIssueConventions || "Standard GitHub bug report: Description, Steps to Reproduce, Expected Behavior, Actual Behavior, Environment."}
+`;
+
+    const prompt = `
+You are drafting a professional, high-signal GitHub Bug Report Issue for ${owner}/${repo}.
+You have discovered and confirmed an unhandled edge-case bug.
+
+${templatePrompt}
+
+### Discovered Bug Details:
+Title: ${candidate.title}
+Archetype: ${candidate.labels?.join(", ") || "latent-bug"}
+Target Component / File: ${candidate.body}
+
+### Reproduction Proof:
+Reproduction Command: ${proof?.reproCommand || "N/A"}
+Failure Stack Trace:
+\`\`\`
+${proof?.failureTrace ? proof.failureTrace.substring(0, 1500) : "N/A"}
+\`\`\`
+
+TASK:
+Draft the GitHub Issue title and body.
+1. Match the heading structure, tone, and conventions used in this repo's existing bug reports.
+2. Clearly describe what triggers the problem with concrete steps or minimal code snippet.
+3. Include the exact error trace observed.
+4. Do NOT mention AutoHarness or AI agents — format it as a top-tier human engineer or open-source contributor submitting a clear, actionable bug report.
+
+OUTPUT FORMAT:
+TITLE: [Issue Title]
+BODY:
+[Issue Body Markdown]
+`;
+
+    try {
+        const { text } = await generateText({
+            model: MODEL,
+            prompt,
+            system: "You are an elite open-source contributor writing clear, high-signal bug reports."
+        });
+
+        const titleMatch = text.match(/TITLE:\s*(.*)/i);
+        const bodyMatch = text.match(/BODY:\s*([\s\S]*)/i);
+
+        const title = titleMatch ? titleMatch[1].trim() : candidate.title;
+        const body = bodyMatch ? bodyMatch[1].trim() : `${candidate.body}\n\n### Reproduction\n\`\`\`\n${proof?.reproCommand}\n\`\`\`\n\n\`\`\`\n${proof?.failureTrace}\n\`\`\``;
+
+        return {
+            title,
+            body,
+            labels: ["bug"]
+        };
+    } catch (e: any) {
+        return {
+            title: candidate.title,
+            body: `${candidate.body}\n\n### Reproduction\n\`\`\`\n${proof?.reproCommand}\n\`\`\`\n\n### Error Trace\n\`\`\`\n${proof?.failureTrace}\n\`\`\``,
+            labels: ["bug"]
+        };
+    }
+}
+
+
 /**
  * Stages 9 & 10: Drafting the Pull Request (Breken Proof Format).
  * Formats a high-signal PR description with root-cause analysis, proof of reproduction,
@@ -26,9 +133,28 @@ export async function draftPullRequest(
     github: GitHubService,
     owner: string,
     repo: string,
-    proof?: ProofContext
+    proof?: ProofContext,
+    prTemplate?: string
 ): Promise<{ title: string; body: string }> {
     console.log(`\n✏️  Stage 9 & 10: Drafting Proof-Backed Pull Request for: ${candidate.title}`);
+
+    const templatePrompt = prTemplate ? `
+### Official Repository PR Template (You MUST fill out this exact template):
+\`\`\`markdown
+${prTemplate}
+\`\`\`
+Instructions:
+1. Retain all section headers, checklists, and structure from the official template above.
+2. Mark checklist items [x] as appropriate for verified bug fixes with regression tests.
+` : `
+Requirements:
+1. Title should follow conventional commits if the repo uses them (e.g. \`fix(scope): concise description\`).
+2. Body should be structured cleanly:
+   - ## Summary (concise explanation of bug and fix)
+   - ## Root Cause
+   - ## Proof & Verification (mention the failing test/reproduction and confirmation of pass)
+   - ## Affected Files
+`;
 
     const prompt = `
 You are drafting a high-signal, maintainer-friendly Pull Request for ${owner}/${repo} (following the Breken AI OSS standard).
@@ -53,14 +179,7 @@ ${proof?.failureTrace ? proof.failureTrace.substring(0, 1000) : "N/A"}
 Verification Status:
 ${proof?.verification ? proof.verification.summary : "Verified locally"}
 
-Draft the PR title and body.
-Requirements:
-1. Title should follow conventional commits if the repo uses them (e.g. \`fix(scope): concise description\`).
-2. Body should be structured cleanly:
-   - ## Summary (concise explanation of bug and fix)
-   - ## Root Cause
-   - ## Proof & Verification (mention the failing test/reproduction and confirmation of pass)
-   - ## Affected Files
+${templatePrompt}
 3. Do NOT invent hypothetical changes. Be surgical, precise, and maintainer-friendly.
 
 OUTPUT FORMAT:

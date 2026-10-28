@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import { generateText, type LanguageModel } from "ai";
 import { google } from "@ai-sdk/google";
 
@@ -23,6 +24,40 @@ export interface RepoEnvironment {
     baselinePassed?: boolean;
     baselineDurationMs?: number;
     lastTestedAt?: string;
+}
+
+export interface ProposalRecord {
+    id: string;
+    timestamp: string;
+    status: "PENDING" | "APPROVED" | "REJECTED";
+    rejectionNotes?: string;
+    targetOwner: string;
+    targetRepo: string;
+    huntedBug?: {
+        title: string;
+        description: string;
+        archetype: string;
+        targetFile: string;
+    };
+    issueDraft?: {
+        title: string;
+        body: string;
+        issueNumber?: number;
+        issueUrl?: string;
+    };
+    prDraft?: {
+        title: string;
+        body: string;
+        prUrl?: string;
+    };
+    codeFix?: {
+        summary: string;
+        modifiedFiles: string[];
+        confidence: string;
+    };
+    diff: string;
+    reproCommand?: string;
+    failureTrace?: string;
 }
 
 interface RulesStorage {
@@ -72,13 +107,38 @@ export class BehavioralMemory {
     private baseDir: string;
     private globalStoragePath: string;
 
-    constructor(storageDir: string = ".autoharness") {
-        this.baseDir = path.resolve(storageDir);
+    constructor(storageDir?: string) {
+        const defaultStorage = process.env.AUTOHARNESS_DATA_DIR || path.join(os.homedir(), ".autoharness");
+        this.baseDir = path.resolve(storageDir || defaultStorage);
         if (!fs.existsSync(this.baseDir)) {
             fs.mkdirSync(this.baseDir, { recursive: true });
         }
+        this.migrateLegacyStorage();
         this.globalStoragePath = path.join(this.baseDir, "global_rules.json");
         this.ensureGlobalDefaults();
+    }
+
+    private migrateLegacyStorage() {
+        const legacyDir = path.resolve(".autoharness");
+        if (legacyDir !== this.baseDir && fs.existsSync(legacyDir)) {
+            try {
+                const copyRecursive = (src: string, dest: string) => {
+                    if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+                    for (const item of fs.readdirSync(src)) {
+                        const srcItem = path.join(src, item);
+                        const destItem = path.join(dest, item);
+                        if (fs.statSync(srcItem).isDirectory()) {
+                            copyRecursive(srcItem, destItem);
+                        } else if (!fs.existsSync(destItem)) {
+                            fs.copyFileSync(srcItem, destItem);
+                        }
+                    }
+                };
+                copyRecursive(legacyDir, this.baseDir);
+            } catch (e) {
+                console.warn("[Memory] Migration from legacy storage warning:", e);
+            }
+        }
     }
 
     private ensureGlobalDefaults() {
@@ -287,4 +347,157 @@ If no generalizable rule can be extracted, output "NONE".
             console.warn(`[BehavioralMemory] Failed to distill rule from feedback: ${e.message}`);
         }
     }
+
+    // ── Proposal & Patch Vault ───────────────────────────────────────────
+
+    public getProposalsDir(owner: string, repo: string): string {
+        const dir = path.join(this.getRepoDir(owner, repo), "proposals");
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        return dir;
+    }
+
+    public saveProposal(
+        owner: string,
+        repo: string,
+        proposal: Omit<ProposalRecord, "id" | "timestamp">,
+        probeCode?: string
+    ): string {
+        const id = `prop_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        const timestamp = new Date().toISOString();
+        const record: ProposalRecord = {
+            ...proposal,
+            id,
+            timestamp,
+        };
+
+        const propDir = path.join(this.getProposalsDir(owner, repo), id);
+        fs.mkdirSync(propDir, { recursive: true });
+
+        fs.writeFileSync(path.join(propDir, "metadata.json"), JSON.stringify(record, null, 2), "utf-8");
+        if (proposal.diff) {
+            fs.writeFileSync(path.join(propDir, "patch.diff"), proposal.diff, "utf-8");
+        }
+        if (probeCode) {
+            fs.writeFileSync(path.join(propDir, "probe_test.py"), probeCode, "utf-8");
+        }
+
+        // Maintain index in proposals.json
+        const indexFile = path.join(this.getRepoDir(owner, repo), "proposals.json");
+        let proposals: ProposalRecord[] = [];
+        try {
+            if (fs.existsSync(indexFile)) {
+                proposals = JSON.parse(fs.readFileSync(indexFile, "utf-8"));
+            }
+        } catch (e) {}
+
+        proposals.unshift(record);
+        // Retention limit: keep last 30 proposals
+        if (proposals.length > 30) {
+            const pruned = proposals.splice(30);
+            for (const old of pruned) {
+                try {
+                    fs.rmSync(path.join(this.getProposalsDir(owner, repo), old.id), { recursive: true, force: true });
+                } catch (e) {}
+            }
+        }
+
+        fs.writeFileSync(indexFile, JSON.stringify(proposals, null, 2), "utf-8");
+        return id;
+    }
+
+    public updateProposalStatus(
+        owner: string,
+        repo: string,
+        id: string,
+        status: "APPROVED" | "REJECTED",
+        rejectionNotes?: string,
+        issueData?: { issueNumber: number; issueUrl: string },
+        prUrl?: string
+    ) {
+        const propDir = path.join(this.getProposalsDir(owner, repo), id);
+        const metaPath = path.join(propDir, "metadata.json");
+        if (fs.existsSync(metaPath)) {
+            try {
+                const record: ProposalRecord = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+                record.status = status;
+                if (rejectionNotes) record.rejectionNotes = rejectionNotes;
+                if (issueData) {
+                    record.issueDraft = {
+                        ...(record.issueDraft || { title: "", body: "" }),
+                        issueNumber: issueData.issueNumber,
+                        issueUrl: issueData.issueUrl,
+                    };
+                }
+                if (prUrl) {
+                    record.prDraft = {
+                        ...(record.prDraft || { title: "", body: "" }),
+                        prUrl,
+                    };
+                }
+                fs.writeFileSync(metaPath, JSON.stringify(record, null, 2), "utf-8");
+            } catch (e) {}
+        }
+
+        // Also update proposals.json index
+        const indexFile = path.join(this.getRepoDir(owner, repo), "proposals.json");
+        try {
+            if (fs.existsSync(indexFile)) {
+                const proposals: ProposalRecord[] = JSON.parse(fs.readFileSync(indexFile, "utf-8"));
+                const target = proposals.find((p) => p.id === id);
+                if (target) {
+                    target.status = status;
+                    if (rejectionNotes) target.rejectionNotes = rejectionNotes;
+                    if (issueData) {
+                        target.issueDraft = {
+                            ...(target.issueDraft || { title: "", body: "" }),
+                            issueNumber: issueData.issueNumber,
+                            issueUrl: issueData.issueUrl,
+                        };
+                    }
+                    if (prUrl) {
+                        target.prDraft = {
+                            ...(target.prDraft || { title: "", body: "" }),
+                            prUrl,
+                        };
+                    }
+                    fs.writeFileSync(indexFile, JSON.stringify(proposals, null, 2), "utf-8");
+                }
+            }
+        } catch (e) {}
+    }
+
+    public getProposals(owner: string, repo: string): ProposalRecord[] {
+        const indexFile = path.join(this.getRepoDir(owner, repo), "proposals.json");
+        try {
+            if (fs.existsSync(indexFile)) {
+                return JSON.parse(fs.readFileSync(indexFile, "utf-8"));
+            }
+        } catch (e) {}
+        return [];
+    }
+
+    public getProposal(owner: string, repo: string, id: string): { record: ProposalRecord; diff: string; probeCode?: string } | null {
+        const propDir = path.join(this.getProposalsDir(owner, repo), id);
+        const metaPath = path.join(propDir, "metadata.json");
+        if (!fs.existsSync(metaPath)) return null;
+        try {
+            const record: ProposalRecord = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+            let diff = "";
+            let probeCode: string | undefined;
+            const diffPath = path.join(propDir, "patch.diff");
+            if (fs.existsSync(diffPath)) {
+                diff = fs.readFileSync(diffPath, "utf-8");
+            }
+            const probePath = path.join(propDir, "probe_test.py");
+            if (fs.existsSync(probePath)) {
+                probeCode = fs.readFileSync(probePath, "utf-8");
+            }
+            return { record, diff, probeCode };
+        } catch (e) {
+            return null;
+        }
+    }
 }
+

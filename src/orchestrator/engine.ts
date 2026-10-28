@@ -11,10 +11,10 @@ import {
 } from "./reproduce.js";
 import { runLocalization, type LocalizationResult } from "./localize.js";
 import { runVerification, type VerificationResult } from "./verify.js";
-import { extractMergePatterns } from "./style.js";
+import { extractMergePatterns, extractRepoPolicy, type RepoPolicyContract } from "./style.js";
 import { runCodeFixAgent, type CodeFixResult } from "./codefix.js";
-import { draftPullRequest } from "./drafting.js";
-import { submitPullRequest } from "./submit.js";
+import { draftPullRequest, draftIssueForHuntedBug, type IssueDraft } from "./drafting.js";
+import { submitPullRequest, type SubmissionResult } from "./submit.js";
 import { BugHunterAgent } from "./hunter.js";
 import type { TaskBlackboard } from "./blackboard.js";
 import { execSync } from "node:child_process";
@@ -28,11 +28,14 @@ export interface PipelineOptions {
     similarIssueNumber?: number;
     waitForGate?: (gateData: {
         draft: { title: string; body: string };
+        issueDraft?: IssueDraft;
         codeFix: CodeFixResult;
         diff: string;
         verification: VerificationResult;
         targetOwner: string;
         targetRepo: string;
+        proposalId?: string;
+        claNotice?: { required: boolean; url?: string; message: string };
     }) => Promise<{ approved: boolean; notes?: string }>;
 }
 
@@ -306,12 +309,13 @@ export class PipelineEngine extends EventEmitter {
             }
             blackboard.localization = localization;
 
-            // ── Stage 8: Style & Convention Extraction ───────────────────
+            // ── Stage 8: Repository Policy & Convention Extraction ───────
             this.emitPipelineEvent("stage:start", "STYLE", { repo: options.repo });
-            this.emitPipelineEvent("stage:log", "STYLE", `Extracting merge patterns from recent PRs...`);
-            const repoStyleGuide = await extractMergePatterns(this.github, targetOwner, targetRepo);
+            this.emitPipelineEvent("stage:log", "STYLE", `Analyzing CONTRIBUTING.md, templates, and CLA/DCO policies...`);
             const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
-            this.emitPipelineEvent("stage:complete", "STYLE", { styleGuide: repoStyleGuide });
+            const repoPolicy = await extractRepoPolicy(this.github, targetOwner, targetRepo, contributingMd);
+            const repoStyleGuide = repoPolicy.styleGuide;
+            this.emitPipelineEvent("stage:complete", "STYLE", { styleGuide: repoStyleGuide, policy: repoPolicy });
 
             // ── Stage 9: Surgical Fixer (agy CLI) ─────────────────────────
             this.emitPipelineEvent("stage:start", "CODEFIX", { targets: localization.targetFiles });
@@ -353,8 +357,29 @@ export class PipelineEngine extends EventEmitter {
             this.emitPipelineEvent("verification:complete", "VERIFY", verification);
             this.emitPipelineEvent("stage:complete", "VERIFY", verification);
 
-            // ── Stage 11: PR Drafting ─────────────────────────────────────
+            // ── Stage 11: Issue & PR Drafting ─────────────────────────────
             this.emitPipelineEvent("stage:start", "DRAFTING", { candidate: candidate.title });
+
+            let issueDraft: IssueDraft | undefined;
+            if (candidate.sourceType === "hunted") {
+                this.emitPipelineEvent("stage:log", "DRAFTING", `Drafting style-matched GitHub issue for discovered bug...`);
+                issueDraft = await draftIssueForHuntedBug(
+                    candidate,
+                    this.github,
+                    targetOwner,
+                    targetRepo,
+                    {
+                        reproCommand: reproProof?.command,
+                        failureTrace: reproProof?.failureTrace,
+                        verification
+                    },
+                    repoPolicy.issueTemplate
+                );
+                if (blackboard) {
+                    blackboard.issueDraft = issueDraft;
+                }
+            }
+
             const draft = await draftPullRequest(
                 candidate,
                 repoStyleGuide,
@@ -366,24 +391,86 @@ export class PipelineEngine extends EventEmitter {
                     reproCommand: reproProof?.command,
                     failureTrace: reproProof?.failureTrace,
                     verification
-                }
+                },
+                repoPolicy.prTemplate
             );
-            this.emitPipelineEvent("stage:complete", "DRAFTING", draft);
+            this.emitPipelineEvent("stage:complete", "DRAFTING", { draft, issueDraft });
+
+            // ── Stage 11.5: Proposal & Patch Vault Archival ──────────────
+            let probeCodeContent: string | undefined;
+            if (candidate.sourceType === "hunted") {
+                try {
+                    const probePath = blackboard?.hunter?.probeFilePath || path.join(reproResult.repoPath, "tests/test_hunted_probe.py");
+                    if (fs.existsSync(probePath)) {
+                        probeCodeContent = fs.readFileSync(probePath, "utf-8");
+                    }
+                } catch (e) {}
+            }
+
+            const proposalId = this.memory.saveProposal(
+                targetOwner,
+                targetRepo,
+                {
+                    status: "PENDING",
+                    targetOwner,
+                    targetRepo,
+                    huntedBug: candidate.sourceType === "hunted" ? {
+                        title: candidate.title,
+                        description: candidate.body,
+                        archetype: candidate.labels?.[1] || "latent-bug",
+                        targetFile: reproResult.affectedFiles?.[0]?.filename || ""
+                    } : undefined,
+                    issueDraft,
+                    prDraft: draft,
+                    codeFix: {
+                        summary: codeFix.summary,
+                        modifiedFiles: codeFix.modifiedFiles,
+                        confidence: codeFix.confidence
+                    },
+                    diff: gitDiff,
+                    reproCommand: reproProof?.command,
+                    failureTrace: reproProof?.failureTrace
+                },
+                probeCodeContent
+            );
 
             // ── Stage 12: Human Review Gate (Closed-Loop Ratchet) ─────────
-            this.emitPipelineEvent("stage:start", "GATE", { draft, diff: gitDiff });
+            const claNotice = repoPolicy.requiresCLA ? {
+                required: true,
+                url: repoPolicy.claUrl,
+                message: repoPolicy.claInstructions || `⚠️ This repository requires contributors to sign a Contributor License Agreement (CLA) before PRs can be merged.${repoPolicy.claUrl ? ` Sign here: ${repoPolicy.claUrl}` : ''}`
+            } : undefined;
+
+            this.emitPipelineEvent("stage:start", "GATE", { draft, issueDraft, diff: gitDiff, proposalId, claNotice });
+            if (claNotice) {
+                this.emitPipelineEvent("stage:log", "GATE", `⚠️ ACTION REQUIRED: This repository requires contributors to sign a Contributor License Agreement (CLA) before contributions can be merged.`);
+                if (claNotice.url) {
+                    this.emitPipelineEvent("stage:log", "GATE", `👉 Please fill out and sign the CLA here: ${claNotice.url}`);
+                }
+            }
             let gateApproved = false;
             let gateNotes: string | undefined;
 
             if (options.waitForGate) {
-                this.emitPipelineEvent("gate:waiting", "GATE", { draft, diff: gitDiff, codeFix, verification });
+                this.emitPipelineEvent("gate:waiting", "GATE", {
+                    draft,
+                    issueDraft,
+                    diff: gitDiff,
+                    codeFix,
+                    verification,
+                    proposalId,
+                    claNotice
+                });
                 const gateResponse = await options.waitForGate({
                     draft,
+                    issueDraft,
                     codeFix,
                     diff: gitDiff,
                     verification,
                     targetOwner,
-                    targetRepo
+                    targetRepo,
+                    proposalId,
+                    claNotice
                 });
                 gateApproved = gateResponse.approved;
                 gateNotes = gateResponse.notes;
@@ -398,34 +485,68 @@ export class PipelineEngine extends EventEmitter {
             }
 
             if (!gateApproved) {
-                this.emitPipelineEvent("stage:complete", "GATE", { status: "REJECTED" });
+                // Update proposal in vault as REJECTED with notes
+                this.memory.updateProposalStatus(targetOwner, targetRepo, proposalId, "REJECTED", gateNotes);
+
+                // Clean working tree to leave workspace pristine
+                try {
+                    execSync("git checkout . && git clean -fd", { cwd: reproResult.repoPath, encoding: "utf-8" });
+                } catch (e) {}
+
+                this.emitPipelineEvent("stage:complete", "GATE", { status: "REJECTED", proposalId });
                 this.isRunning = false;
-                return { success: false, error: "Halted by human reviewer at approval gate." };
+                return { success: false, error: "Halted by human reviewer at approval gate. Proposal archived in vault." };
             }
 
-            this.emitPipelineEvent("stage:complete", "GATE", { status: "APPROVED" });
+            this.emitPipelineEvent("stage:complete", "GATE", { status: "APPROVED", proposalId });
 
-            // ── Stage 13: Submission ──────────────────────────────────────
-            this.emitPipelineEvent("stage:start", "SUBMIT", { draftTitle: draft.title });
-            this.emitPipelineEvent("stage:log", "SUBMIT", `Pushing branch to fork and opening PR on GitHub...`);
+            // ── Stage 13: Two-Phase Submission (Issue + PR) ───────────────
+            this.emitPipelineEvent("stage:start", "SUBMIT", { draftTitle: draft.title, issueTitle: issueDraft?.title });
+            this.emitPipelineEvent("stage:log", "SUBMIT", `Executing two-phase submission on GitHub${repoPolicy.requiresDCO ? " (with DCO signoff)" : ""}...`);
 
-            const prUrl = await submitPullRequest(
+            const submission = await submitPullRequest(
                 this.github,
                 targetOwner,
                 targetRepo,
                 draft,
                 reproResult.localDirName,
-                codeFix.modifiedFiles
+                codeFix.modifiedFiles,
+                undefined,
+                issueDraft,
+                repoPolicy.requiresDCO
             );
 
-            if (prUrl) {
-                this.emitPipelineEvent("pr:submitted", "SUBMIT", { prUrl, title: draft.title });
-                this.emitPipelineEvent("stage:complete", "SUBMIT", { prUrl });
-                this.emitPipelineEvent("pipeline:done", undefined, { success: true, prUrl });
+            if (submission && submission.prUrl) {
+                // Update proposal in vault as APPROVED with PR & Issue links
+                this.memory.updateProposalStatus(
+                    targetOwner,
+                    targetRepo,
+                    proposalId,
+                    "APPROVED",
+                    gateNotes,
+                    submission.issueNumber ? { issueNumber: submission.issueNumber, issueUrl: submission.issueUrl! } : undefined,
+                    submission.prUrl
+                );
+
+                this.emitPipelineEvent("pr:submitted", "SUBMIT", {
+                    prUrl: submission.prUrl,
+                    issueUrl: submission.issueUrl,
+                    issueNumber: submission.issueNumber,
+                    title: draft.title
+                });
+                this.emitPipelineEvent("stage:complete", "SUBMIT", {
+                    prUrl: submission.prUrl,
+                    issueUrl: submission.issueUrl
+                });
+                this.emitPipelineEvent("pipeline:done", undefined, {
+                    success: true,
+                    prUrl: submission.prUrl,
+                    issueUrl: submission.issueUrl
+                });
                 this.isRunning = false;
-                return { success: true, prUrl };
+                return { success: true, prUrl: submission.prUrl };
             } else {
-                throw new Error("GitHub submission failed during PR creation.");
+                throw new Error("GitHub submission failed during PR or Issue creation.");
             }
 
         } catch (err: any) {

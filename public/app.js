@@ -199,6 +199,20 @@ document.addEventListener("DOMContentLoaded", () => {
             case "stage:complete":
                 setNodeStatus(evt.stage, "completed", "Complete ✓");
                 appendLog(`[${time}] ✓ ${evt.stage} completed`, "pass");
+                if (evt.stage === "DRAFTING" && evt.data) {
+                    if (evt.data.issueDraft) {
+                        const issueTitleEl = document.getElementById("issue-draft-title");
+                        const issueBodyEl = document.getElementById("issue-draft-body");
+                        if (issueTitleEl) issueTitleEl.textContent = evt.data.issueDraft.title;
+                        if (issueBodyEl) issueBodyEl.textContent = evt.data.issueDraft.body;
+                    }
+                    if (evt.data.draft) {
+                        const prTitleEl = document.getElementById("pr-draft-title");
+                        const prBodyEl = document.getElementById("pr-draft-body");
+                        if (prTitleEl) prTitleEl.textContent = evt.data.draft.title;
+                        if (prBodyEl) prBodyEl.textContent = evt.data.draft.body;
+                    }
+                }
                 break;
 
             case "proof:established":
@@ -229,10 +243,49 @@ document.addEventListener("DOMContentLoaded", () => {
             case "gate:waiting":
                 updateStatus("AWAITING_APPROVAL");
                 setNodeStatus("GATE", "active", "Review Required");
-                gateTitle.textContent = evt.data.draft?.title || "Pull Request Draft Ready";
-                gateSummary.textContent = evt.data.draft?.body || "Review diff and authorize PR submission to GitHub.";
+                gateTitle.textContent = evt.data.draft?.title || "Pull Request Ready for Review";
+                gateSummary.textContent = evt.data.issueDraft 
+                    ? `Phase 1: Will create Issue "${evt.data.issueDraft.title}"\nPhase 2: Will open Pull Request linking to that issue.`
+                    : (evt.data.draft?.body || "Review diff and authorize submission.");
+
+                if (evt.data.issueDraft) {
+                    const issueTitleEl = document.getElementById("issue-draft-title");
+                    const issueBodyEl = document.getElementById("issue-draft-body");
+                    if (issueTitleEl) issueTitleEl.textContent = evt.data.issueDraft.title;
+                    if (issueBodyEl) issueBodyEl.textContent = evt.data.issueDraft.body;
+                }
+                if (evt.data.draft) {
+                    const prTitleEl = document.getElementById("pr-draft-title");
+                    const prBodyEl = document.getElementById("pr-draft-body");
+                    if (prTitleEl) prTitleEl.textContent = evt.data.draft.title;
+                    if (prBodyEl) prBodyEl.textContent = evt.data.draft.body;
+                }
+
+                const claWarningBox = document.getElementById("gate-cla-warning");
+                const claText = document.getElementById("gate-cla-text");
+                const claLink = document.getElementById("gate-cla-link");
+                if (evt.data.claNotice && evt.data.claNotice.required) {
+                    if (claWarningBox) claWarningBox.classList.remove("hidden");
+                    if (claText) claText.textContent = evt.data.claNotice.message;
+                    if (claLink) {
+                        if (evt.data.claNotice.url) {
+                            claLink.href = evt.data.claNotice.url;
+                            claLink.style.display = "inline-block";
+                        } else {
+                            claLink.style.display = "none";
+                        }
+                    }
+                    appendLog(`[${time}] ⚠️ CLA Warning: Repository requires a signed Contributor License Agreement`, "err");
+                } else {
+                    if (claWarningBox) claWarningBox.classList.add("hidden");
+                }
+
+                btnGateApprove.textContent = evt.data.issueDraft 
+                    ? "✓ Approve Two-Phase Submission (Issue + PR)"
+                    : "✓ Approve & Submit PR";
+
                 gateBanner.classList.remove("hidden");
-                appendLog(`[${time}] 🛑 Paused at Human Review Gate`, "proof");
+                appendLog(`[${time}] 🛑 Paused at Human Review Gate (Proposal vaulted)`, "proof");
                 break;
 
             case "gate:resolved":
@@ -320,6 +373,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Human Gate Handlers
     btnGateApprove.addEventListener("click", async () => {
+        const claWarningBox = document.getElementById("gate-cla-warning");
+        const claCheckbox = document.getElementById("gate-cla-checkbox");
+        if (claWarningBox && !claWarningBox.classList.contains("hidden")) {
+            if (claCheckbox && !claCheckbox.checked) {
+                const confirmed = confirm(
+                    "⚠️ Contributor License Agreement (CLA) Reminder\n\n" +
+                    "This repository requires contributors to sign a CLA before pull requests can be accepted.\n\n" +
+                    "Have you filled out and signed the CLA for this repository?\n\n" +
+                    "Click OK if you have signed it (or wish to proceed now), or Cancel to go back and open the CLA link."
+                );
+                if (!confirmed) {
+                    return;
+                }
+            }
+        }
+
         const notes = gateNotes.value.trim();
         btnGateApprove.disabled = true;
         btnGateReject.disabled = true;
@@ -332,6 +401,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             gateBanner.classList.add("hidden");
             gateNotes.value = "";
+            if (claCheckbox) claCheckbox.checked = false;
         } catch (e) {
             alert("Failed to submit gate approval: " + e.message);
         } finally {
@@ -412,6 +482,88 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
+    // Vault Modal Handlers (OS ~/.autoharness)
+    const btnOpenVault = document.getElementById("btn-open-vault");
+    const vaultModal = document.getElementById("vault-modal");
+    const btnCloseVault = document.getElementById("btn-close-vault");
+    const vaultContainer = document.getElementById("vault-proposals-container");
+
+    async function loadVaultProposals() {
+        const repo = repoInput.value.trim();
+        if (!repo || !repo.includes("/")) {
+            vaultContainer.innerHTML = `<p class="dim-text">Please enter a valid repository (owner/repo) first.</p>`;
+            return;
+        }
+        vaultContainer.innerHTML = `<p class="dim-text">Loading archived proposals for ${repo} from OS vault (~/.autoharness)...</p>`;
+        try {
+            const res = await fetch(`/api/proposals?repo=${encodeURIComponent(repo)}`);
+            const data = await res.json();
+            const proposals = data.proposals || [];
+            if (proposals.length === 0) {
+                vaultContainer.innerHTML = `<div class="empty-state">No proposals archived yet for ${repo}.</div>`;
+                return;
+            }
+
+            vaultContainer.innerHTML = proposals.map(p => `
+                <div class="proposal-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 14px; margin-bottom: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 600; font-size: 13px; color: ${p.status === 'APPROVED' ? '#7ee787' : p.status === 'REJECTED' ? '#f85149' : '#e3b341'};">
+                            ${p.status === 'APPROVED' ? '✓ APPROVED' : p.status === 'REJECTED' ? '✕ REJECTED' : '⏳ PENDING'}
+                        </span>
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.4);">${new Date(p.timestamp).toLocaleString()}</span>
+                    </div>
+                    <h4 style="margin: 0 0 6px 0; color: #f0f6fc; font-size: 14px;">${p.prDraft?.title || p.huntedBug?.title || 'Untitled Proposal'}</h4>
+                    ${p.issueDraft ? `<div style="font-size: 12px; color: #58a6ff; margin-bottom: 6px;">📝 Issue: ${p.issueDraft.title} ${p.issueDraft.issueNumber ? `(#${p.issueDraft.issueNumber})` : ''}</div>` : ''}
+                    ${p.rejectionNotes ? `<div style="font-size: 12px; color: #f85149; margin-bottom: 6px;">💬 Rejection Note: ${p.rejectionNotes}</div>` : ''}
+                    ${p.codeFix ? `<div style="font-size: 12px; color: rgba(255,255,255,0.6); margin-bottom: 8px;">Files: ${p.codeFix.modifiedFiles.join(', ')}</div>` : ''}
+                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                        <button class="btn-mini btn-view-diff" data-id="${p.id}" style="padding: 4px 10px; font-size: 11px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; color: #f0f6fc; cursor: pointer;">View Diff</button>
+                        ${p.prDraft?.prUrl ? `<a href="${p.prDraft.prUrl}" target="_blank" style="padding: 4px 10px; font-size: 11px; text-decoration: none; color: #58a6ff; border: 1px solid rgba(88,166,255,0.3); border-radius: 4px; display: inline-block;">View PR ↗</a>` : ''}
+                        ${p.issueDraft?.issueUrl ? `<a href="${p.issueDraft.issueUrl}" target="_blank" style="padding: 4px 10px; font-size: 11px; text-decoration: none; color: #e3b341; border: 1px solid rgba(227,179,65,0.3); border-radius: 4px; display: inline-block;">View Issue ↗</a>` : ''}
+                    </div>
+                </div>
+            `).join("");
+
+            vaultContainer.querySelectorAll(".btn-view-diff").forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    const id = btn.getAttribute("data-id");
+                    const [owner, name] = repo.split("/");
+                    const res = await fetch(`/api/proposals/${owner}/${name}/${id}`);
+                    const detail = await res.json();
+                    if (detail.diff) {
+                        diffOutput.textContent = detail.diff;
+                        diffFileCount.textContent = `Archived Patch: ${detail.record?.prDraft?.title || id}`;
+                        document.querySelector('[data-tab="tab-diff"]')?.click();
+                        vaultModal.classList.add("hidden");
+                    }
+                });
+            });
+        } catch (e) {
+            vaultContainer.innerHTML = `<p class="dim-text" style="color: #f85149;">Failed to load vault proposals: ${e.message}</p>`;
+        }
+    }
+
+    if (btnOpenVault) {
+        btnOpenVault.addEventListener("click", () => {
+            vaultModal.classList.remove("hidden");
+            loadVaultProposals();
+        });
+    }
+
+    if (btnCloseVault) {
+        btnCloseVault.addEventListener("click", () => {
+            vaultModal.classList.add("hidden");
+        });
+    }
+
+    if (vaultModal) {
+        vaultModal.addEventListener("click", (e) => {
+            if (e.target === vaultModal) {
+                vaultModal.classList.add("hidden");
+            }
+        });
+    }
+
     // Initial Status Check & Connect
     async function checkInitialStatus() {
         try {
@@ -421,7 +573,40 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.status === "AWAITING_APPROVAL" && data.latestGateData) {
                 gateBanner.classList.remove("hidden");
                 gateTitle.textContent = data.latestGateData.draft?.title || "PR Ready for Review";
-                gateSummary.textContent = data.latestGateData.draft?.body || "";
+                gateSummary.textContent = data.latestGateData.issueDraft 
+                    ? `Phase 1: Will create Issue "${data.latestGateData.issueDraft.title}"\nPhase 2: Will open Pull Request linking to that issue.`
+                    : (data.latestGateData.draft?.body || "");
+
+                if (data.latestGateData.issueDraft) {
+                    const issueTitleEl = document.getElementById("issue-draft-title");
+                    const issueBodyEl = document.getElementById("issue-draft-body");
+                    if (issueTitleEl) issueTitleEl.textContent = data.latestGateData.issueDraft.title;
+                    if (issueBodyEl) issueBodyEl.textContent = data.latestGateData.issueDraft.body;
+                }
+                if (data.latestGateData.draft) {
+                    const prTitleEl = document.getElementById("pr-draft-title");
+                    const prBodyEl = document.getElementById("pr-draft-body");
+                    if (prTitleEl) prTitleEl.textContent = data.latestGateData.draft.title;
+                    if (prBodyEl) prBodyEl.textContent = data.latestGateData.draft.body;
+                }
+
+                const claWarningBox = document.getElementById("gate-cla-warning");
+                const claText = document.getElementById("gate-cla-text");
+                const claLink = document.getElementById("gate-cla-link");
+                if (data.latestGateData.claNotice && data.latestGateData.claNotice.required) {
+                    if (claWarningBox) claWarningBox.classList.remove("hidden");
+                    if (claText) claText.textContent = data.latestGateData.claNotice.message;
+                    if (claLink) {
+                        if (data.latestGateData.claNotice.url) {
+                            claLink.href = data.latestGateData.claNotice.url;
+                            claLink.style.display = "inline-block";
+                        } else {
+                            claLink.style.display = "none";
+                        }
+                    }
+                } else {
+                    if (claWarningBox) claWarningBox.classList.add("hidden");
+                }
             }
         } catch (e) {}
     }
@@ -429,3 +614,4 @@ document.addEventListener("DOMContentLoaded", () => {
     checkInitialStatus();
     connectSSE();
 });
+

@@ -30,6 +30,9 @@
             </div>
 
             <div class="topbar-actions">
+                <button id="btn-open-vault" class="btn-ghost" title="View Proposal & Patch Vault (OS ~/.autoharness)">
+                    <span class="icon">📦</span> Patch Vault
+                </button>
                 <button id="btn-open-memory" class="btn-ghost" title="View Persistent Behavioral Rules (arXiv:2607.13091)">
                     <span class="icon">🧠</span> Behavioral Memory
                 </button>
@@ -171,10 +174,23 @@
 
             <!-- Human Review Gate Slide-in Banner (Visible when Awaiting Review) -->
             <section id="gate-banner" class="gate-banner hidden">
-                <div class="gate-content">
                     <div class="gate-badge">🛑 HUMAN REVIEW GATE REQUIRED</div>
                     <h2 id="gate-pr-title" class="gate-title">Drafting PR...</h2>
                     <p id="gate-pr-summary" class="gate-summary"></p>
+                    
+                    <div id="gate-cla-warning" class="cla-warning-box hidden" style="background: rgba(227, 179, 65, 0.12); border: 1px solid rgba(227, 179, 65, 0.4); border-radius: 6px; padding: 12px 16px; margin-bottom: 14px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                            <div style="font-size: 13px; color: #e3b341; line-height: 1.4;">
+                                <strong>⚠️ Contributor License Agreement (CLA) Required to Contribute:</strong>
+                                <div id="gate-cla-text" style="color: #c9d1d9; margin-top: 2px;">This repository requires all contributors to sign their CLA before pull requests can be accepted.</div>
+                            </div>
+                            <a id="gate-cla-link" href="#" target="_blank" style="background: #e3b341; color: #0d1117; font-weight: 600; text-decoration: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;">Sign CLA ↗</a>
+                        </div>
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(227, 179, 65, 0.2); display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" id="gate-cla-checkbox" style="cursor: pointer; width: 15px; height: 15px; accent-color: #e3b341;">
+                            <label for="gate-cla-checkbox" style="font-size: 12px; color: #8b949e; cursor: pointer; user-select: none;">I have signed or confirmed the Contributor License Agreement (CLA) for this repository</label>
+                        </div>
+                    </div>
                     
                     <div class="gate-actions-row">
                         <div class="gate-feedback-input-wrap">
@@ -219,6 +235,12 @@
                         </button>
                         <button class="tab-btn" data-tab="tab-localization">
                             🎯 Fault Localization
+                        </button>
+                        <button class="tab-btn" data-tab="tab-issue">
+                            📝 Issue Draft
+                        </button>
+                        <button class="tab-btn" data-tab="tab-pr">
+                            🔀 PR Draft
                         </button>
                     </div>
 
@@ -265,10 +287,44 @@
                                 <p id="localization-explanation" class="dim-text">N/A</p>
                             </div>
                         </div>
+
+                        <!-- Tab 4: Issue Draft -->
+                        <div id="tab-issue" class="tab-pane">
+                            <div class="diff-header-info">
+                                <span id="issue-draft-title" style="font-weight: 600; color: #58a6ff;">No issue draft generated yet.</span>
+                            </div>
+                            <pre id="issue-draft-body" class="code-block markdown-view">(Waiting for discovered bug issue generation...)</pre>
+                        </div>
+
+                        <!-- Tab 5: PR Draft -->
+                        <div id="tab-pr" class="tab-pane">
+                            <div class="diff-header-info">
+                                <span id="pr-draft-title" style="font-weight: 600; color: #7ee787;">No PR draft generated yet.</span>
+                            </div>
+                            <pre id="pr-draft-body" class="code-block markdown-view">(Waiting for PR draft generation...)</pre>
+                        </div>
                     </div>
                 </div>
             </div>
         </main>
+    </div>
+
+    <!-- Modal: Proposal & Patch Vault (OS ~/.autoharness) -->
+    <div id="vault-modal" class="modal-backdrop hidden">
+        <div class="modal-card" style="max-width: 900px; width: 90%;">
+            <div class="modal-header">
+                <h3>📦 Proposal & Patch Vault (OS ~/.autoharness)</h3>
+                <button id="btn-close-vault" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-desc">
+                    Archived history of discovered bugs, patches, reproduction tests, and review notes. Even rejected patches are preserved here so you can review and restore them anytime.
+                </p>
+                <div id="vault-proposals-container" style="max-height: 480px; overflow-y: auto; margin-top: 15px;">
+                    <p class="dim-text">Loading archived proposals from ~/.autoharness...</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Modal: Behavioral Memory (arXiv:2607.13091) -->
