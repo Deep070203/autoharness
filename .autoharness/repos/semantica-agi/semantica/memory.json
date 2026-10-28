@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "rule_1793201312760_0tco",
+      "rule": "Always ensure a corresponding issue is created and linked before opening a pull request.",
+      "scope": "semantica-agi/semantica",
+      "source": "human_rejection_lesson",
+      "createdAt": "2026-10-28T15:28:32.760Z"
+    }
+  ]
+}

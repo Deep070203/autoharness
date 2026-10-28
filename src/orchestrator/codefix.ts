@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execSync, spawn } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
+import type { TaskBlackboard } from "./blackboard.js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -162,7 +163,8 @@ export async function runCodeFixAgent(
     localization?: LocalizationResult,
     accumulatedRules?: string,
     reproProof?: { command: string; failureTrace: string },
-    onLog?: (msg: string) => void
+    onLog?: (msg: string) => void,
+    blackboard?: TaskBlackboard
 ): Promise<CodeFixResult> {
     if (process.env.USE_AGY === "true") {
         onLog?.(`[CodeFix] Attempting autonomous fix via agy CLI...`);
@@ -174,7 +176,8 @@ export async function runCodeFixAgent(
             localization,
             accumulatedRules,
             reproProof,
-            onLog
+            onLog,
+            blackboard
         );
 
         const hasSourceModifications = agyResult.modifiedFiles.some(
@@ -229,7 +232,28 @@ TEST_RESULT: [PASS|FAIL|NO_TESTS|SKIPPED]`;
     let userPrompt = `### Issue & Analysis
 ${reproResult.analysis.substring(0, 3000)}`;
 
-    if (localization && localization.targetFiles.length > 0) {
+    if (blackboard?.hunter) {
+        userPrompt += `\n\n=== SELF-HUNTED BUG CONTRACT (Breken Protocol) ===
+Target File: ${blackboard.hunter.targetFile}
+Archetype: ${blackboard.hunter.archetype}
+Description: ${blackboard.hunter.description}
+Reproduction Command: \`${blackboard.hunter.probeCommand}\`
+Initial Failure:
+\`\`\`
+${blackboard.hunter.failureTrace.substring(0, 1500)}
+\`\`\`
+
+MISSION:
+Apply a minimal, surgical fix to ${blackboard.hunter.targetFile} so that \`${blackboard.hunter.probeCommand}\` exits 0!`;
+
+        const absTarget = path.join(reproResult.repoPath, blackboard.hunter.targetFile);
+        if (fs.existsSync(absTarget)) {
+            try {
+                const targetSrc = fs.readFileSync(absTarget, "utf-8");
+                userPrompt += `\n\n### Target File Content (${blackboard.hunter.targetFile}):\n\`\`\`\n${targetSrc.length > 20000 ? targetSrc.substring(0, 20000) + "\n...[truncated]" : targetSrc}\n\`\`\``;
+            } catch (e) {}
+        }
+    } else if (localization && localization.targetFiles.length > 0) {
         userPrompt += `\n\n### Fault Localization
 Target Files: ${localization.targetFiles.join(", ")}
 Target Functions/Symbols: ${localization.likelyFunctions.join(", ") || "See relevant modules"}
@@ -325,7 +349,8 @@ async function runCodeFixAgentWithAgy(
     localization?: LocalizationResult,
     accumulatedRules?: string,
     reproProof?: { command: string; failureTrace: string },
-    onLog?: (msg: string) => void
+    onLog?: (msg: string) => void,
+    blackboard?: TaskBlackboard
 ): Promise<CodeFixResult> {
     console.log(`\n🔧 Code Fix Agent (using agy CLI): Working on ${reproResult.repoPath}`);
 
@@ -342,7 +367,17 @@ ${accumulatedRules || "1. Keep patches strictly minimal and surgical.\n2. Write 
 - Do NOT run heavy, open-ended or whole-repository test suites (such as bare 'pytest' or 'npm test') which can hang. Run ONLY the specific targeted reproduction test file or syntax check.
 - MANDATORY: You must apply the surgical fix to the localized target files. Do NOT stop after only writing test files.`;
 
-    if (localization && localization.targetFiles.length > 0) {
+    if (blackboard?.hunter) {
+        prompt += `\n\n=== SELF-HUNTED BUG CONTRACT (Breken Protocol) ===
+Target File: ${blackboard.hunter.targetFile}
+Archetype: ${blackboard.hunter.archetype}
+Reproduction Command: \`${blackboard.hunter.probeCommand}\`
+Initial Failure Output:
+\`\`\`
+${blackboard.hunter.failureTrace.substring(0, 1500)}
+\`\`\`
+MANDATORY: You must make this reproduction command exit 0 (pass) by minimally editing ${blackboard.hunter.targetFile}!`;
+    } else if (localization && localization.targetFiles.length > 0) {
         prompt += `\n\n=== FAULT LOCALIZATION (Agentless / UIUC) ===
 Target Files: ${localization.targetFiles.join(", ")}
 Target Functions/Symbols: ${localization.likelyFunctions.join(", ") || "See relevant modules"}

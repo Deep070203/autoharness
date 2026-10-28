@@ -178,11 +178,18 @@ app.get("/api/rules", (req: Request, res: Response) => {
 });
 
 app.post("/api/rules", (req: Request, res: Response) => {
-    const { rule, scope } = req.body;
+    const { rule, scope, owner, repo } = req.body;
     if (!rule || typeof rule !== "string") {
         return res.status(400).json({ error: "Missing rule string." });
     }
-    memory.addRule(rule, scope || "global", "ui_manual");
+    let targetOwner = owner;
+    let targetRepo = repo;
+    if (!targetOwner && scope && scope.includes("/")) {
+        const parts = scope.split("/");
+        targetOwner = parts[0];
+        targetRepo = parts[1];
+    }
+    memory.addRule(rule, scope || "global", "ui_manual", targetOwner, targetRepo);
     res.json({ success: true, message: "Rule stored in behavioral memory." });
 });
 

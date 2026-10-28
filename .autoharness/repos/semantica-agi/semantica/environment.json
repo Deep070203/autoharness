@@ -1,0 +1,5 @@
+{
+  "detectedRunner": "pytest -q --tb=short",
+  "baselinePassed": false,
+  "lastTestedAt": "2026-10-28T15:19:48.626Z"
+}

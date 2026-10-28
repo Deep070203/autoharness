@@ -16,6 +16,7 @@ import { runCodeFixAgent, type CodeFixResult } from "./codefix.js";
 import { draftPullRequest } from "./drafting.js";
 import { submitPullRequest } from "./submit.js";
 import { BugHunterAgent } from "./hunter.js";
+import type { TaskBlackboard } from "./blackboard.js";
 import { execSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -99,6 +100,7 @@ export class PipelineEngine extends EventEmitter {
             let candidate: any = null;
             let reproResult: ReproductionResult | null = null;
             let reproProof: { command: string; failureTrace: string } | undefined;
+            let blackboard: TaskBlackboard | undefined;
 
             if (options.issueNumber) {
                 // ── Mode 1: Targeted Issue Resolution ─────────────────────
@@ -161,7 +163,7 @@ export class PipelineEngine extends EventEmitter {
                 const repoPath = path.join(this.github.baseDir, localDirName);
 
                 this.emitPipelineEvent("stage:log", "HUNTER", `Auditing codebase against Breken bug archetypes (type panics, mutation, protocol drops, unhandled fallbacks)...`);
-                const hunter = new BugHunterAgent(repoPath, targetOwner, targetRepo);
+                const hunter = new BugHunterAgent(repoPath, targetOwner, targetRepo, this.memory);
                 const huntedBug = await hunter.hunt((msg) => this.emitPipelineEvent("stage:log", "HUNTER", msg));
 
                 if (huntedBug) {
@@ -193,6 +195,28 @@ export class PipelineEngine extends EventEmitter {
                         fixSummary: huntedBug.title,
                         reproCommand: huntedBug.probeCommand,
                         initialFailingTrace: huntedBug.failureTrace
+                    };
+
+                    blackboard = {
+                        repo: {
+                            owner: targetOwner,
+                            name: targetRepo,
+                            path: repoPath,
+                            defaultBranch: "main"
+                        },
+                        memory: {
+                            rules: [],
+                            formattedRules: this.memory.getFormattedRules(targetOwner, targetRepo)
+                        },
+                        hunter: {
+                            title: huntedBug.title,
+                            description: huntedBug.description,
+                            archetype: huntedBug.archetype,
+                            targetFile: huntedBug.targetFile,
+                            probeFilePath: huntedBug.probeFilePath,
+                            probeCommand: huntedBug.probeCommand,
+                            failureTrace: huntedBug.failureTrace
+                        }
                     };
 
                     this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
@@ -266,6 +290,21 @@ export class PipelineEngine extends EventEmitter {
             }
             this.emitPipelineEvent("localization:complete", "LOCALIZE", localization);
             this.emitPipelineEvent("stage:complete", "LOCALIZE", localization);
+            if (!blackboard) {
+                blackboard = {
+                    repo: {
+                        owner: targetOwner,
+                        name: targetRepo,
+                        path: reproResult.repoPath,
+                        defaultBranch: "main"
+                    },
+                    memory: {
+                        rules: [],
+                        formattedRules: this.memory.getFormattedRules(targetOwner, targetRepo)
+                    }
+                };
+            }
+            blackboard.localization = localization;
 
             // ── Stage 8: Style & Convention Extraction ───────────────────
             this.emitPipelineEvent("stage:start", "STYLE", { repo: options.repo });
@@ -287,7 +326,8 @@ export class PipelineEngine extends EventEmitter {
                 localization,
                 accumulatedRules,
                 reproProof,
-                (msg) => this.emitPipelineEvent("stage:log", "CODEFIX", msg)
+                (msg) => this.emitPipelineEvent("stage:log", "CODEFIX", msg),
+                blackboard
             );
 
             if (!codeFix.success || codeFix.modifiedFiles.length === 0) {

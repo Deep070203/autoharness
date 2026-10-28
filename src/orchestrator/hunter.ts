@@ -3,6 +3,7 @@ import { google } from "@ai-sdk/google";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { BehavioralMemory } from "../utils/memory.js";
 
 const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
 
@@ -17,6 +18,13 @@ export interface HuntedBug {
     sourceType: "hunted";
 }
 
+export interface GroundingContext {
+    baselinePassed: boolean;
+    detectedRunner?: string;
+    recentCommits: { hash: string; message: string; diffStat: string }[];
+    churnedFiles: string[];
+}
+
 const execEnv = {
     ...process.env,
     CI: "true",
@@ -25,21 +33,148 @@ const execEnv = {
 };
 
 /**
- * Breken-Style Autonomous Bug Hunter Agent.
- * Sweeps a repository for high-frequency latent bug archetypes,
- * formulates a testable hypothesis, writes an isolated probe test,
- * and executes it.
+ * Breken-Style Autonomous Bug Hunter Agent with SWE Grounding.
  *
- * CRITICAL RULE: If the probe test does not fail with a genuine application error,
- * the hypothesis is discarded. A bug is ONLY reported if the probe test crashes
- * with a concrete TypeError, AttributeError, KeyError, IndexError, etc.
+ * Workflow:
+ * 1. Establish baseline test health and detect test runner.
+ * 2. Analyze recent git commits and diffs (the "fresh code" delta).
+ * 3. Formulate edge-case hypotheses targeting newly introduced or modified logic.
+ * 4. Execute the probe test. Confirm it crashes with a genuine application error
+ *    (AttributeError, TypeError, KeyError, IndexError, AssertionError).
  */
 export class BugHunterAgent {
-    constructor(private repoPath: string, private owner: string, private repo: string) {}
+    private memory: BehavioralMemory;
+
+    constructor(
+        private repoPath: string,
+        private owner: string,
+        private repo: string,
+        memory?: BehavioralMemory
+    ) {
+        this.memory = memory || new BehavioralMemory();
+    }
 
     /**
-     * Executes the autonomous hunting loop over ranked candidate batches.
-     * Returns a proven bug with its reproduction probe, or null if no bug proved.
+     * Step 1: Runs the baseline health check like a professional SWE.
+     */
+    public async runBaselineCheck(onLog?: (msg: string) => void): Promise<{ passed: boolean; runner?: string; output: string }> {
+        const log = (msg: string) => {
+            console.log(`[Grounding] ${msg}`);
+            if (onLog) onLog(msg);
+        };
+
+        const cached = this.memory.getRepoEnvironment(this.owner, this.repo);
+        let runner = cached?.detectedRunner;
+
+        if (!runner) {
+            if (fs.existsSync(path.join(this.repoPath, "package.json"))) {
+                try {
+                    const pkg = JSON.parse(fs.readFileSync(path.join(this.repoPath, "package.json"), "utf-8"));
+                    if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes("no test specified")) {
+                        runner = "npm test";
+                    }
+                } catch (e) {}
+            }
+            if (!runner && (fs.existsSync(path.join(this.repoPath, "pyproject.toml")) || fs.existsSync(path.join(this.repoPath, "setup.py")))) {
+                runner = "pytest -q --tb=short";
+            }
+            if (!runner && fs.existsSync(path.join(this.repoPath, "Cargo.toml"))) {
+                runner = "cargo test";
+            }
+            if (!runner && fs.existsSync(path.join(this.repoPath, "go.mod"))) {
+                runner = "go test ./...";
+            }
+        }
+
+        if (!runner) {
+            log("No standard test runner detected; proceeding with standalone probe verification.");
+            return { passed: true, output: "No runner detected" };
+        }
+
+        log(`Running baseline test suite: \`${runner}\`...`);
+        try {
+            const out = execSync(runner, {
+                cwd: this.repoPath,
+                encoding: "utf-8",
+                timeout: 60_000,
+                env: execEnv
+            });
+            log(`✅ Baseline tests passed cleanly.`);
+            this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                detectedRunner: runner,
+                baselinePassed: true,
+                lastTestedAt: new Date().toISOString()
+            });
+            return { passed: true, runner, output: out.substring(0, 1500) };
+        } catch (err: any) {
+            const output = (err.stdout || err.stderr || err.message).substring(0, 2000);
+            log(`⚠️ Baseline tests finished with non-zero exit. Existing state captured to avoid false regressions.`);
+            this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                detectedRunner: runner,
+                baselinePassed: false,
+                lastTestedAt: new Date().toISOString()
+            });
+            return { passed: false, runner, output };
+        }
+    }
+
+    /**
+     * Step 2: Analyzes recent git commits to find high-churn files where bugs cluster.
+     */
+    public getRecentGitChurn(): GroundingContext {
+        const recentCommits: { hash: string; message: string; diffStat: string }[] = [];
+        const churnedFilesSet = new Set<string>();
+
+        try {
+            const logOut = execSync('git log -n 10 --pretty=format:"%H|%s" --no-merges', {
+                cwd: this.repoPath,
+                encoding: "utf-8",
+                timeout: 10_000
+            });
+
+            for (const line of logOut.split("\n")) {
+                const [hash, ...rest] = line.split("|");
+                const message = rest.join("|").trim();
+                if (!hash || !message) continue;
+
+                let diffStat = "";
+                try {
+                    diffStat = execSync(`git show ${hash} --stat --oneline`, {
+                        cwd: this.repoPath,
+                        encoding: "utf-8",
+                        timeout: 5_000
+                    });
+
+                    // Extract modified filenames from diffStat
+                    const fileLines = diffStat.split("\n").slice(1);
+                    for (const fl of fileLines) {
+                        const match = fl.trim().match(/^([^\s|]+)\s*\|/);
+                        if (match) {
+                            const filename = match[1].trim();
+                            if (
+                                !filename.startsWith(".") &&
+                                !filename.includes("test") &&
+                                !filename.includes("docs/")
+                            ) {
+                                churnedFilesSet.add(filename);
+                            }
+                        }
+                    }
+                } catch (e) {}
+
+                recentCommits.push({ hash, message, diffStat: diffStat.substring(0, 500) });
+            }
+        } catch (e) {}
+
+        return {
+            baselinePassed: true,
+            recentCommits,
+            churnedFiles: Array.from(churnedFilesSet)
+        };
+    }
+
+    /**
+     * Main Hunting Execution Loop
      */
     public async hunt(onLog?: (msg: string) => void): Promise<HuntedBug | null> {
         const log = (msg: string) => {
@@ -49,23 +184,21 @@ export class BugHunterAgent {
 
         log(`Starting deep autonomous bug hunt in ${this.owner}/${this.repo}...`);
 
-        // 1. Inspect recent bug-fix commits to detect patterns maintainers care about
-        let recentGitHistory = "";
-        try {
-            recentGitHistory = execSync("git log -n 15 --oneline --grep='fix' --grep='bug'", {
-                cwd: this.repoPath,
-                encoding: "utf-8",
-                timeout: 10_000,
-            });
-        } catch (e) {
-            recentGitHistory = "(git history unavailable)";
+        // 1. Establish Baseline Health
+        const baseline = await this.runBaselineCheck(onLog);
+
+        // 2. Extract Recent Git Churn
+        log("Analyzing recent git commits and modified files to locate fresh, high-churn code...");
+        const grounding = this.getRecentGitChurn();
+        if (grounding.churnedFiles.length > 0) {
+            log(`Identified ${grounding.churnedFiles.length} recently churned files: ${grounding.churnedFiles.slice(0, 5).join(", ")}`);
         }
 
-        // 2. Discover and filter core source files
-        let sourceFiles: string[] = [];
+        // 3. Discover and rank candidate core source files
+        let allSourceFiles: string[] = [];
         try {
             const ls = execSync("git ls-files", { cwd: this.repoPath, encoding: "utf-8", timeout: 10_000 });
-            sourceFiles = ls
+            allSourceFiles = ls
                 .split("\n")
                 .map((s) => s.trim())
                 .filter((s) => {
@@ -88,35 +221,41 @@ export class BugHunterAgent {
                     return isCode && !isIgnored;
                 });
         } catch (e) {
-            log("Could not enumerate source files via git.");
+            log("Could not enumerate files.");
             return null;
         }
 
-        if (sourceFiles.length === 0) {
+        if (allSourceFiles.length === 0) {
             log("No eligible source code files found to audit.");
             return null;
         }
 
-        // Prioritize utility, helper, parsing, format, and config modules (where Breken bugs cluster)
+        // Rank files: Recently churned files FIRST, followed by utility/parsing/config files
         const highYieldKeywords = ["util", "helper", "color", "split", "format", "config", "parse", "clean", "type", "rule", "model", "match", "transform", "sanitize"];
-        sourceFiles.sort((a, b) => {
-            const aBase = path.basename(a).toLowerCase();
-            const bBase = path.basename(b).toLowerCase();
-            const aScore = highYieldKeywords.some(k => aBase.includes(k) || a.toLowerCase().includes(k)) ? 1 : 0;
-            const bScore = highYieldKeywords.some(k => bBase.includes(k) || b.toLowerCase().includes(k)) ? 1 : 0;
-            return bScore - aScore;
+        const churnSet = new Set(grounding.churnedFiles);
+
+        allSourceFiles.sort((a, b) => {
+            const aIsChurn = churnSet.has(a) ? 10 : 0;
+            const bIsChurn = churnSet.has(b) ? 10 : 0;
+            const aKeyword = highYieldKeywords.some(k => a.toLowerCase().includes(k)) ? 2 : 0;
+            const bKeyword = highYieldKeywords.some(k => b.toLowerCase().includes(k)) ? 2 : 0;
+            return (bIsChurn + bKeyword) - (aIsChurn + aKeyword);
         });
 
-        log(`Identified ${sourceFiles.length} candidate core files. Top candidates: ${sourceFiles.slice(0, 5).join(", ")}`);
+        // Filter out files that were already probed in previous runs
+        const unprobedFiles = allSourceFiles.filter(f => !this.memory.isProbeAlreadyTested(this.owner, this.repo, f));
+        const candidateFiles = unprobedFiles.length > 0 ? unprobedFiles : allSourceFiles;
+
+        log(`Ranked ${candidateFiles.length} candidate files. Top targets: ${candidateFiles.slice(0, 5).join(", ")}`);
 
         // Batch audit: Try up to 4 batches of 2-3 files
         const batchSize = 3;
         const maxBatches = 4;
-        const numBatches = Math.min(maxBatches, Math.ceil(sourceFiles.length / batchSize));
+        const numBatches = Math.min(maxBatches, Math.ceil(candidateFiles.length / batchSize));
 
         for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
-            const batchFiles = sourceFiles.slice(batchIdx * batchSize, (batchIdx + 1) * batchSize);
-            log(`[Audit Round ${batchIdx + 1}/${numBatches}] Inspecting files: ${batchFiles.join(", ")}`);
+            const batchFiles = candidateFiles.slice(batchIdx * batchSize, (batchIdx + 1) * batchSize);
+            log(`[Audit Round ${batchIdx + 1}/${numBatches}] Auditing code in: ${batchFiles.join(", ")}`);
 
             const fileSamples = batchFiles.map((relPath) => {
                 const absPath = path.join(this.repoPath, relPath);
@@ -127,6 +266,8 @@ export class BugHunterAgent {
                     return `--- File: ${relPath} (unreadable) ---`;
                 }
             }).join("\n\n");
+
+            const recentCommitsSummary = grounding.recentCommits.slice(0, 5).map(c => `- ${c.hash.substring(0, 7)}: ${c.message}`).join("\n");
 
             const hypothesisPrompt = `
 You are an expert security researcher and software engineer finding latent bugs in open-source projects (Breken AI standard).
@@ -140,11 +281,14 @@ You are an expert security researcher and software engineer finding latent bugs 
 6. Type Coercion / Enum Fallback: Converting input to enum or string where passing None or unexpected values triggers ValueError/KeyError instead of default.
 7. Unchecked Return Values: Functions returning None on failure which callers immediately dereference.
 
+### Recent Commit Context:
+${recentCommitsSummary || "No recent commits found."}
+
 ### Source Code Samples for this Round:
 ${fileSamples}
 
 TASK:
-Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or type variations) that crashes with an unhandled exception.
+Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or unexpected types) that crashes with an unhandled exception.
 Construct an exact standalone executable probe test script in the same language.
 - The probe test must import the function from the package directly.
 - The probe test must NOT require external databases, cloud services, or network calls.
@@ -203,6 +347,7 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
                         env: execEnv,
                     });
                     log(`Round ${batchIdx + 1}: Probe test passed (exit 0). Hypothesis discarded (Zero False Positives).`);
+                    this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile);
                     try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                     continue;
                 } catch (err: any) {
@@ -225,6 +370,11 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
 
                 // If it reached here, we have a GENUINE application crash!
                 log(`🎯 PROBE FAILED AS HYPOTHESIZED! Real latent bug confirmed!\n${failureTrace.substring(0, 400)}`);
+                this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile, {
+                    title: parsed.title,
+                    targetFile: parsed.targetFile
+                });
+
                 return {
                     title: parsed.title,
                     description: parsed.explanation,
