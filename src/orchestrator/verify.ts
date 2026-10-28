@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
 
 export interface VerificationResult {
     passed: boolean;
@@ -10,12 +11,6 @@ export interface VerificationResult {
     regressionOutput: string;
     summary: string;
 }
-
-const execEnv = {
-    ...process.env,
-    CI: "true",
-    PATH: `${process.env.HOME}/.local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:${process.env.PATH || ""}`,
-};
 
 /**
  * Verifier & QA Agent (inspired by SWE-bench / Breken Proof Contract).
@@ -30,19 +25,20 @@ export async function runVerification(
 ): Promise<VerificationResult> {
     console.log(`\n🛡️ [Verifier Agent] Verifying fix in ${repoPath}...`);
 
+    const repoEnv = resolveRepoEnv(repoPath);
     let reproPassed = true;
     let reproOutput = "";
 
     // 1. Check reproduction proof
     if (reproCommand) {
-        let cmd = reproCommand;
+        let cmd = normalizeCommandWithVenv(reproCommand, repoEnv.pythonBin);
         console.log(`[Verifier] Running reproduction command: ${cmd}`);
         try {
             const out = execSync(cmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
                 timeout: 90_000,
-                env: execEnv
+                env: repoEnv.env
             });
             reproOutput = out.substring(0, 4000);
             reproPassed = true;
@@ -57,7 +53,7 @@ export async function runVerification(
                         cwd: repoPath,
                         encoding: "utf-8",
                         timeout: 90_000,
-                        env: execEnv
+                        env: repoEnv.env
                     });
                     reproOutput = out.substring(0, 4000);
                     reproPassed = true;
@@ -86,13 +82,14 @@ export async function runVerification(
     }
 
     if (testCmd) {
+        testCmd = normalizeCommandWithVenv(testCmd, repoEnv.pythonBin);
         console.log(`[Verifier] Running regression test suite: ${testCmd}`);
         try {
             const out = execSync(testCmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
                 timeout: 90_000,
-                env: execEnv
+                env: repoEnv.env
             });
             regressionOutput = out.substring(0, 3000);
             regressionPassed = true;

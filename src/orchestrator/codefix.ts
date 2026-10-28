@@ -7,10 +7,11 @@ import * as path from "path";
 import { execSync, spawn } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 import type { TaskBlackboard } from "./blackboard.js";
+import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
-const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
 // Note: Using claude-3-5-sonnet-latest as the model name since "claude-sonnet-4.6" is not a valid API identifier
 // const MODEL: LanguageModel = anthropic("claude-haiku-4-5-20251001") as unknown as LanguageModel;
 
@@ -30,6 +31,7 @@ const modifiedFilesSet = new Set<string>();
  * Pattern: Claude Code's Explore agent style — one-line descriptions, no fluff.
  */
 function createCodeTools(repoPath: string, onLog?: (msg: string) => void) {
+    const repoEnv = resolveRepoEnv(repoPath);
     return {
         read_file: tool({
             description: "Read a file. Returns full content, truncated at 50k chars.",
@@ -93,10 +95,11 @@ function createCodeTools(repoPath: string, onLog?: (msg: string) => void) {
             }),
             execute: async (args) => {
                 try {
-                    onLog?.(`[CodeFix] Shell: ${args.command.substring(0, 80)}`);
-                    const out = execSync(args.command, {
+                    const normCmd = normalizeCommandWithVenv(args.command, repoEnv.pythonBin);
+                    onLog?.(`[CodeFix] Shell: ${normCmd.substring(0, 80)}`);
+                    const out = execSync(normCmd, {
                         cwd: repoPath, timeout: 45_000, encoding: 'utf-8',
-                        maxBuffer: 5 * 1024 * 1024, env: { ...process.env, CI: 'true' },
+                        maxBuffer: 5 * 1024 * 1024, env: repoEnv.env,
                     });
                     return (out.length > 5000 ? out.substring(0, 5000) + `\n[truncated]` : out) || 'ok: no output';
                 } catch (e: any) {

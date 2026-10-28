@@ -4,8 +4,9 @@ import { google } from "@ai-sdk/google";
 import * as path from "path";
 import * as fs from "fs";
 import { execSync } from "node:child_process";
+import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
 
-const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
 
 /**
  * Structured result from Stage 5 analysis.
@@ -310,24 +311,19 @@ REPRO_COMMAND: NONE
             return undefined;
         }
 
-        let command = match[1].trim().replace(/^`/, "").replace(/`$/, "");
+        const repoEnv = resolveRepoEnv(repoPath);
+        let command = normalizeCommandWithVenv(match[1].trim().replace(/^`/, "").replace(/`$/, ""), repoEnv.pythonBin);
         if (command.startsWith("python ")) {
             command = command.replace(/^python /, "python3 ");
         }
         console.log(`[Proof Protocol] Executing candidate repro: ${command}`);
-
-        const execEnv = {
-            ...process.env,
-            CI: "true",
-            PATH: `${process.env.HOME}/.local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:${process.env.PATH || ""}`,
-        };
 
         try {
             execSync(command, {
                 cwd: repoPath,
                 encoding: "utf-8",
                 timeout: 45_000,
-                env: execEnv
+                env: repoEnv.env
             });
             console.log(`[Proof Protocol] Repro command passed unexpectedly (exit 0). Proof not confirmed.`);
             return undefined;

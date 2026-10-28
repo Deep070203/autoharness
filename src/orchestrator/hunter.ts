@@ -4,8 +4,9 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { BehavioralMemory } from "../utils/memory.js";
+import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
 
-const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
+const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
 
 export interface HuntedBug {
     title: string;
@@ -24,13 +25,6 @@ export interface GroundingContext {
     recentCommits: { hash: string; message: string; diffStat: string }[];
     churnedFiles: string[];
 }
-
-const execEnv = {
-    ...process.env,
-    CI: "true",
-    PYTHONPATH: ".",
-    PATH: `${process.env.HOME}/.local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:${process.env.PATH || ""}`,
-};
 
 /**
  * Breken-Style Autonomous Bug Hunter Agent with SWE Grounding.
@@ -91,13 +85,19 @@ export class BugHunterAgent {
             return { passed: true, output: "No runner detected" };
         }
 
-        log(`Running baseline test suite: \`${runner}\`...`);
+        const repoEnv = resolveRepoEnv(this.repoPath);
+        if (repoEnv.venvDir) {
+            log(`Discovered virtual environment: ${path.relative(this.repoPath, repoEnv.venvDir)}`);
+        }
+
+        const normalizedRunner = normalizeCommandWithVenv(runner, repoEnv.pythonBin);
+        log(`Running baseline test suite: \`${normalizedRunner}\`...`);
         try {
-            const out = execSync(runner, {
+            const out = execSync(normalizedRunner, {
                 cwd: this.repoPath,
                 encoding: "utf-8",
                 timeout: 60_000,
-                env: execEnv
+                env: repoEnv.env
             });
             log(`✅ Baseline tests passed cleanly.`);
             this.memory.saveRepoEnvironment(this.owner, this.repo, {
@@ -330,7 +330,8 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
                 fs.writeFileSync(probeAbsPath, parsed.probeCode, "utf-8");
 
                 // Execute probe with full environment
-                let probeCmd = parsed.probeCommand;
+                const repoEnv = resolveRepoEnv(this.repoPath);
+                let probeCmd = normalizeCommandWithVenv(parsed.probeCommand, repoEnv.pythonBin);
                 if (probeCmd.startsWith("python ")) {
                     probeCmd = probeCmd.replace(/^python /, "python3 ");
                 }
@@ -344,7 +345,7 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
                         cwd: this.repoPath,
                         encoding: "utf-8",
                         timeout: 30_000,
-                        env: execEnv,
+                        env: repoEnv.env,
                     });
                     log(`Round ${batchIdx + 1}: Probe test passed (exit 0). Hypothesis discarded (Zero False Positives).`);
                     this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile);
@@ -363,7 +364,8 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
                     failureTrace.includes("SyntaxError");
 
                 if (isEnvironmentalError) {
-                    log(`Round ${batchIdx + 1}: Probe failed due to environment/import rather than code flaw. Discarding...`);
+                    const lastTraceLine = failureTrace.split('\n').filter(l => l.trim()).slice(-2).join(' | ');
+                    log(`Round ${batchIdx + 1}: Probe failed due to environment/import: ${lastTraceLine}`);
                     try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                     continue;
                 }
