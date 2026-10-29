@@ -11,8 +11,10 @@ import {
     commandTimeoutMs,
     detectProject,
     huntExtensions,
+    assessProbeFailure,
     isEnvironmentalProbeFailure,
     isJsonResponseError,
+    probeBuildsFake,
     probeInstructions,
     resolveProbeFile,
     type ProjectProfile,
@@ -51,6 +53,7 @@ export interface GroundingContext {
 export class BugHunterAgent {
     private memory: BehavioralMemory;
     private projectProfile?: ProjectProfile;
+    private roundNotes: string[] = [];
 
     constructor(
         private repoPath: string,
@@ -291,6 +294,7 @@ export class BugHunterAgent {
             if (onLog) onLog(msg);
         };
 
+        this.roundNotes = [];
         log(`Starting deep autonomous bug hunt in ${this.owner}/${this.repo}...`);
 
         // 1. Establish Baseline Health
@@ -402,11 +406,14 @@ Write a standalone script in the same language. It is executed directly (python 
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
 - Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls.
 - Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
-- When the bug is present the process must crash with a traceback (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is absent it must exit 0.
+- Do NOT define a class, mock, fake, stub, or patch. Call the public function with None, "", [], 0, or an object the library itself constructs. A traceback that names a type you defined is your probe, and it will be discarded.
+- When the bug is present the process must crash with a traceback raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is absent it must exit 0.
 ${outputFormat}`;
 
             const hypothesisPrompt = `
 You are an expert security researcher and software engineer finding latent bugs in open-source projects (Breken AI standard).
+
+A bug is a crash inside the library on a value a real caller can pass. If the only way to make it crash is to pass an object you defined, there is no bug. Say what the code actually does.
 
 ### 7 High-Yield Bug Archetypes:
 1. Type & Nil Panics: Passing valid/common edge-case types (None/null, empty strings, numbers, dicts, instances) to functions that fail to validate input and raise unhandled AttributeError or TypeError.
@@ -450,6 +457,7 @@ ${taskSection}
 
                     if (!parsed.targetFile || !parsed.probeCode || !probeFileName || probeFileName.includes("..") || path.isAbsolute(probeFileName)) {
                         log(`Round ${batchIdx + 1}: Hypothesis did not yield structured probe. Continuing...`);
+                        this.roundNotes.push(`Round ${batchIdx + 1}: the model did not return a runnable probe`);
                         break;
                     }
 
@@ -473,6 +481,18 @@ ${taskSection}
                         break;
                     }
 
+                    const fake = probeBuildsFake(probeCode);
+                    if (fake) {
+                        log(`Round ${batchIdx + 1}: Probe defines a stand-in (${fake}). A crash of that object would be the probe, not the library.`);
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
+                        if (attempt === 1) {
+                            importFeedback = `The probe defined ${fake}. Delete every mock, fake, stub, and class. Call the public function with None, "", [], 0, or an object the library constructs. The traceback must be raised inside ${parsed.targetFile}.`;
+                            continue;
+                        }
+                        this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): rejected a probe that defined ${fake}`);
+                        break;
+                    }
+
                     log(`Executing probe command: ${probeCmd}`);
                     let failureTrace = "";
 
@@ -484,7 +504,8 @@ ${taskSection}
                             env: { ...repoEnv.env, CARGO_TERM_COLOR: "never" },
                             stdio: ["ignore", "pipe", "pipe"],
                         });
-                        log(`Round ${batchIdx + 1}: Probe test passed (exit 0). Hypothesis discarded (Zero False Positives).`);
+                        log(`Round ${batchIdx + 1}: Probe exited 0. That hypothesis is not a bug.`);
+                        this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): probe exited 0, so "${parsed.title}" is not a bug`);
                         this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile);
                         try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         break;
@@ -501,25 +522,46 @@ ${taskSection}
                     if (isEnvironmentalError) {
                         const lastTraceLine = failureTrace.split("\n").filter((l: string) => l.trim()).slice(-2).join(" | ");
                         const shadowed = failureTrace.includes("partially initialized module") && failureTrace.includes(this.repoPath);
-                        log(`Round ${batchIdx + 1}: Probe failed due to environment/import${shadowed ? " (project module shadowed the stdlib)" : ""}: ${lastTraceLine}`);
+                        log(`Round ${batchIdx + 1}: Probe failed during setup${shadowed ? " (project module shadowed the stdlib)" : ""}, before the library ran: ${lastTraceLine}`);
                         try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         if (attempt === 1) {
                             importFeedback = failureTrace;
-                            log(`Round ${batchIdx + 1}: Asking for a corrected standalone probe.`);
+                            log(`Round ${batchIdx + 1}: Asking for a probe that actually reaches the library.`);
                             continue;
                         }
+                        this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): probe failed during setup, before the library ran`);
                         break;
                     }
 
-                    log(`🎯 PROBE FAILED AS HYPOTHESIZED! Real latent bug confirmed!\n${failureTrace.substring(0, 400)}`);
+                    const verdict = assessProbeFailure({
+                        trace: failureTrace,
+                        probeSource: probeCode,
+                        targetFile: String(parsed.targetFile),
+                    });
+                    if (!verdict.accept) {
+                        log(`Round ${batchIdx + 1}: Not a bug. ${verdict.reason}`);
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
+                        if (attempt === 1) {
+                            importFeedback = `${verdict.reason}. Call the public function with a value a real caller would pass, and crash inside ${parsed.targetFile}. Do not define a stand-in.`;
+                            continue;
+                        }
+                        this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): ${verdict.reason}`);
+                        break;
+                    }
+
+                    const exceptionType = verdict.exceptionType || "Error";
+                    const title = String(parsed.title).includes(exceptionType)
+                        ? String(parsed.title)
+                        : `${exceptionType} in ${parsed.targetFile}: ${(verdict.exceptionMessage || verdict.reason).slice(0, 80)}`;
+                    log(`Confirmed crash inside ${parsed.targetFile}: ${verdict.reason}`);
                     this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile, {
-                        title: parsed.title,
+                        title,
                         targetFile: parsed.targetFile
                     });
 
                     return {
-                        title: parsed.title,
-                        description: parsed.explanation,
+                        title,
+                        description: `Confirmed crash inside ${parsed.targetFile}: ${verdict.reason}\n\n${parsed.explanation}`,
                         archetype: parsed.archetype,
                         targetFile: parsed.targetFile,
                         probeFilePath: probeFileName,
@@ -534,12 +576,16 @@ ${taskSection}
                         continue;
                     }
                     log(`Round ${batchIdx + 1} error: ${cycleErr.message}`);
+                    this.roundNotes.push(`Round ${batchIdx + 1}: probe could not be run (${cycleErr.message})`);
                     break;
                 }
             }
         }
 
-        log("Hunting cycles finished. No verifiable latent bug confirmed across audited batches.");
+        const report = this.roundNotes.length > 0
+            ? `No verifiable bug in the code I audited.\n${this.roundNotes.map((note) => `- ${note}`).join("\n")}`
+            : "No verifiable bug. Every probe either passed or never reached the library.";
+        log(report);
         return null;
     }
 }

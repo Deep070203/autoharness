@@ -10,6 +10,7 @@ import {
     detectProject,
     goProbeFile,
     huntExtensions,
+    assessProbeFailure,
     isEnvironmentalProbeFailure,
     isJsonResponseError,
     isPythonSetupFailure,
@@ -188,4 +189,94 @@ test("rust probe panic is a bug and a missing item is environmental", { timeout:
     const broken = run(command!, root);
     assert.equal(broken.ok, false);
     assert.equal(isEnvironmentalProbeFailure("rust", broken.output, "tests/hunted_probe.rs"), true);
+});
+
+const mockPrefectTrace = [
+    "Traceback (most recent call last):",
+    "  File \"/workspace/prefect/probe_artifacts_aformat_missing.py\", line 18, in main",
+    "    await Artifact.acreate(key=\"test\", description=\"test\", client=client)",
+    "  File \"/workspace/prefect/src/prefect/artifacts.py\", line 62, in acreate",
+    "    async with get_client(sync_client=False, client=client) as client:",
+    "  File \"/workspace/prefect/src/prefect/client/orchestration/__init__.py\", line 199, in __init__",
+    "    async with client:",
+    "TypeError: 'MockPrefectClient' object does not support the asynchronous context manager protocol",
+].join("\n");
+
+test("a crash of a client the probe invented is not a library bug", () => {
+    const probe = [
+        "class MockPrefectClient:",
+        "    pass",
+        "client = MockPrefectClient()",
+        "await Artifact.acreate(client=client)",
+        "",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace: mockPrefectTrace,
+        probeSource: probe,
+        targetFile: "src/prefect/artifacts.py",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /MockPrefectClient|stand-in/);
+});
+
+test("a crash inside the target file on a real call is a bug", () => {
+    const trace = [
+        "Traceback (most recent call last):",
+        "  File \"probe_empty.py\", line 3, in <module>",
+        "    first([])",
+        "  File \"/workspace/demo/src/demo/lists.py\", line 4, in first",
+        "    return items[0]",
+        "IndexError: list index out of range",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "from demo.lists import first\nfirst([])\n",
+        targetFile: "src/demo/lists.py",
+    });
+    assert.equal(verdict.accept, true);
+    assert.equal(verdict.exceptionType, "IndexError");
+});
+
+test("a crash that never reaches the target file is not a bug", () => {
+    const trace = [
+        "Traceback (most recent call last):",
+        "  File \"probe.py\", line 2, in <module>",
+        "    helper()",
+        "  File \"probe.py\", line 1, in helper",
+        "    raise TypeError('probe bug')",
+        "TypeError: probe bug",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "def helper():\n    raise TypeError('probe bug')\nhelper()\n",
+        targetFile: "src/demo/lists.py",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /never entered/);
+});
+
+test("a named stand-in is rejected even without the word Mock", () => {
+    const trace = [
+        "Traceback (most recent call last):",
+        "  File \"/workspace/demo/src/demo/client.py\", line 8, in open",
+        "    async with client:",
+        "TypeError: 'HandmadeClient' object does not support the asynchronous context manager protocol",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "class HandmadeClient:\n    pass\nopen(HandmadeClient())\n",
+        targetFile: "src/demo/client.py",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /HandmadeClient/);
+});
+
+test("a panic inside the target file is a bug", () => {
+    const verdict = assessProbeFailure({
+        trace: "panic: negative\n\t/workspace/demo/pkg/add.go:3 +0x20",
+        probeSource: "package pkg\nfunc TestHuntedProbe(t *testing.T) { Add(-1, 1) }\n",
+        targetFile: "pkg/add.go",
+    });
+    assert.equal(verdict.accept, true);
+    assert.equal(verdict.exceptionType, "panic");
 });

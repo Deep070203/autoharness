@@ -85,7 +85,8 @@ Draft the GitHub Issue title and body.
 1. Match the heading structure, tone, and conventions used in this repo's existing bug reports.
 2. Clearly describe what triggers the problem with concrete steps or minimal code snippet.
 3. Include the exact error trace observed.
-4. Do NOT mention AutoHarness or AI agents — format it as a top-tier human engineer or open-source contributor submitting a clear, actionable bug report.
+4. The stack trace is the bug. The title and body must name the exception type and message from that trace. Do not describe a different missing method, a different exception, or a cause the trace does not show.
+5. Do NOT mention AutoHarness or AI agents — format it as a top-tier human engineer or open-source contributor submitting a clear, actionable bug report.
 
 OUTPUT FORMAT:
 TITLE: [Issue Title]
