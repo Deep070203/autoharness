@@ -6,6 +6,36 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
+export function openBugIssueQuery(owner: string, repo: string, requireBugLabel: boolean): string {
+    const qualifiers = [
+        `repo:${owner}/${repo}`,
+        "is:issue",
+        "is:open",
+        "-label:wontfix",
+        "-label:duplicate",
+        "-label:question",
+    ];
+    if (requireBugLabel) qualifiers.push("label:bug");
+    return qualifiers.join(" ");
+}
+
+export function preferLabeledIssues<T extends { number: number; pull_request?: unknown }>(
+    labeled: T[],
+    general: T[],
+    limit: number
+): T[] {
+    const seen = new Set<number>();
+    const out: T[] = [];
+    for (const item of [...labeled, ...general]) {
+        if (item.pull_request) continue;
+        if (seen.has(item.number)) continue;
+        seen.add(item.number);
+        out.push(item);
+        if (out.length >= limit) break;
+    }
+    return out;
+}
+
 export class GitHubService {
     public octokit: Octokit;
     private unauthOctokit: Octokit;
@@ -69,17 +99,43 @@ export class GitHubService {
     }
 
     /**
-     * Gets open issues that look like bug reports
+     * Gets open issues that look like bug reports.
+     * Labeled bugs come first. Recently updated issues of any kind are only
+     * used to fill the list, so a comment on a question cannot crowd out bugs.
      */
     async getOpenBugIssues(owner: string, repo: string, limit: number = 20) {
         return this.callApi(async (client) => {
-            const response = await client.search.issuesAndPullRequests({
-                q: `repo:${owner}/${repo} is:issue is:open`,
-                sort: "updated",
-                order: "desc",
-                per_page: limit,
-            });
-            return response.data.items.filter((item: any) => !item.pull_request);
+            const search = async (q: string) => {
+                const response = await client.search.issuesAndPullRequests({
+                    q,
+                    sort: "updated",
+                    order: "desc",
+                    per_page: limit,
+                });
+                return response.data.items;
+            };
+
+            let labeled: Awaited<ReturnType<typeof search>> = [];
+            let labeledError: unknown;
+            try {
+                labeled = await search(openBugIssueQuery(owner, repo, true));
+            } catch (err) {
+                labeledError = err;
+            }
+
+            if (labeled.length >= limit) {
+                return preferLabeledIssues(labeled, [], limit);
+            }
+
+            try {
+                const general = await search(openBugIssueQuery(owner, repo, false));
+                return preferLabeledIssues(labeled, general, limit);
+            } catch (err) {
+                if (labeled.length > 0) {
+                    return preferLabeledIssues(labeled, [], limit);
+                }
+                throw labeledError || err;
+            }
         });
     }
 
