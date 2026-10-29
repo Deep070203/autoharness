@@ -8,6 +8,7 @@ import { execSync, spawn } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 import type { TaskBlackboard } from "./blackboard.js";
 import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
+import { commandTimeoutMs } from "../utils/toolchain.js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -89,7 +90,7 @@ function createCodeTools(repoPath: string, onLog?: (msg: string) => void) {
         }),
 
         run_shell: tool({
-            description: "Run a shell command in the repo dir. Timeout 45s. Use for tests, build, grep.",
+            description: "Run a shell command in the repo dir. Use a targeted test, not the whole suite. cargo test of one target may take up to 3 minutes.",
             inputSchema: z.object({
                 command: z.string().describe("Shell command"),
             }),
@@ -98,8 +99,8 @@ function createCodeTools(repoPath: string, onLog?: (msg: string) => void) {
                     const normCmd = normalizeCommandWithVenv(args.command, repoEnv.pythonBin);
                     onLog?.(`[CodeFix] Shell: ${normCmd.substring(0, 80)}`);
                     const out = execSync(normCmd, {
-                        cwd: repoPath, timeout: 45_000, encoding: 'utf-8',
-                        maxBuffer: 5 * 1024 * 1024, env: repoEnv.env,
+                        cwd: repoPath, timeout: commandTimeoutMs(normCmd, 45_000), encoding: 'utf-8',
+                        maxBuffer: 5 * 1024 * 1024, env: { ...repoEnv.env, CARGO_TERM_COLOR: "never" },
                     });
                     return (out.length > 5000 ? out.substring(0, 5000) + `\n[truncated]` : out) || 'ok: no output';
                 } catch (e: any) {
@@ -367,7 +368,7 @@ ${accumulatedRules || "1. Keep patches strictly minimal and surgical.\n2. Write 
 - Do NOT rewrite entire files or clean up unrelated code.
 - Do NOT relax or delete existing test assertions to make tests pass.
 - Focus ONLY on the root cause. Avoid conversational narration; execute commands directly.
-- Do NOT run heavy, open-ended or whole-repository test suites (such as bare 'pytest' or 'npm test') which can hang. Run ONLY the specific targeted reproduction test file or syntax check.
+- Do NOT run heavy, open-ended or whole-repository test suites (such as bare 'pytest', 'npm test', 'go test ./...', or 'cargo test' with no target) which can hang. Run ONLY the specific reproduction command.
 - MANDATORY: You must apply the surgical fix to the localized target files. Do NOT stop after only writing test files.`;
 
     if (blackboard?.hunter) {
