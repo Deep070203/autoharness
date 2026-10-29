@@ -271,6 +271,43 @@ test("a named stand-in is rejected even without the word Mock", () => {
     assert.match(verdict.reason, /HandmadeClient/);
 });
 
+test("a 401 from Prefect Cloud is not a bug, even when the traceback touches the target file", () => {
+    const trace = [
+        "Traceback (most recent call last):",
+        "  File \"/Users/deepshah/Downloads/PRs/prefect/src/prefect/cli/cloud/webhook.py\", line 53, in webhook_ls",
+        "    retrieved_webhooks = await client.request(\"POST\", \"/webhooks/filter\")",
+        "  File \"/Users/deepshah/Downloads/PRs/prefect/src/prefect/client/cloud.py\", line 229, in request",
+        "    raise CloudUnauthorizedError(str(exc)) from exc",
+        "prefect.client.cloud.CloudUnauthorizedError: Client error '401 Unauthorized' for url 'https://api.prefect.cloud/api/webhooks/filter' - Response: {'detail': 'Invalid authentication credentials'}",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "from prefect.cli.cloud.webhook import webhook_ls\nwebhook_ls()\n",
+        targetFile: "src/prefect/cli/cloud/webhook.py",
+        claimedText: "cli: Webhook commands crash with AttributeError on non-string output format",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /remote service|401|CloudUnauthorizedError/);
+});
+
+test("a local crash is rejected when it is a different exception than the hypothesis", () => {
+    const trace = [
+        "Traceback (most recent call last):",
+        "  File \"/workspace/demo/src/demo/lists.py\", line 4, in first",
+        "    return items[0]",
+        "IndexError: list index out of range",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "from demo.lists import first\nfirst([])\n",
+        targetFile: "src/demo/lists.py",
+        claimedText: "first() raises AttributeError when items is empty",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /AttributeError/);
+    assert.match(verdict.reason, /IndexError/);
+});
+
 test("a panic inside the target file is a bug", () => {
     const verdict = assessProbeFailure({
         trace: "panic: negative\n\t/workspace/demo/pkg/add.go:3 +0x20",
