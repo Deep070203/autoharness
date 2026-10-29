@@ -388,6 +388,95 @@ export function isJsonResponseError(message: string): boolean {
     return /JSON|Unexpected token|Bad escaped|Unterminated string|Unexpected end of/i.test(message);
 }
 
+export interface ProbeVerdict {
+    accept: boolean;
+    reason: string;
+    exceptionType?: string;
+    exceptionMessage?: string;
+}
+
+const FAKE_STAND_IN = /\b(?:MagicMock|AsyncMock|NonCallableMock|PropertyMock|unittest\.mock|monkeypatch|mocker|@patch)\b|(?:^|\n)\s*(?:class|struct|type)\s+\w*(?:Mock|Fake|Stub|Dummy)\w*/;
+
+/**
+ * Names the probe itself introduces. A crash that cites one of these is the
+ * probe handing the library an object it just invented.
+ */
+export function standInsDefinedByProbe(source: string): string[] {
+    const names = new Set<string>();
+    for (const match of source.matchAll(/^\s*(?:class|struct)\s+([A-Za-z_]\w*)/gm)) names.add(match[1]);
+    for (const match of source.matchAll(/^\s*type\s+([A-Za-z_]\w*)\s+struct\b/gm)) names.add(match[1]);
+    for (const match of source.matchAll(/\btype\(\s*["']([A-Za-z_]\w*)["']/g)) names.add(match[1]);
+    return [...names];
+}
+
+export function probeBuildsFake(source: string): string | undefined {
+    return source.match(FAKE_STAND_IN)?.[0]?.trim();
+}
+
+export function parseTraceException(trace: string): { type?: string; message?: string } {
+    const lines = trace.split("\n").map((line) => line.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        const typed = line.match(/^([A-Za-z_][\w.]*(?:Error|Exception))\s*:\s*(.*)$/);
+        if (typed) return { type: typed[1].split(".").pop(), message: typed[2] };
+        if (/^panic:/.test(line) || /panicked at/.test(line)) {
+            return { type: "panic", message: line.replace(/^panic:\s*/, "") };
+        }
+    }
+    if (/assertion failed|index out of bounds/.test(trace)) return { type: "panic", message: "panic" };
+    return {};
+}
+
+function traceEntersTarget(trace: string, targetFile: string): boolean {
+    const normalized = targetFile.replace(/\\/g, "/");
+    return trace.replace(/\\/g, "/").includes(normalized);
+}
+
+/**
+ * A failing probe is a bug only when the library itself raises, inside the
+ * file under audit, on an object the probe did not invent.
+ * The Prefect false positive was a TypeError naming MockPrefectClient, a
+ * class the probe defined and passed in as the client.
+ */
+export function assessProbeFailure(input: {
+    trace: string;
+    probeSource: string;
+    targetFile: string;
+}): ProbeVerdict {
+    const fake = probeBuildsFake(input.probeSource);
+    if (fake) {
+        return {
+            accept: false,
+            reason: `the probe defines a stand-in (${fake}). A crash of that stand-in is the probe, not the library`,
+        };
+    }
+
+    const { type, message } = parseTraceException(input.trace);
+    if (!type) {
+        return { accept: false, reason: "the probe exited non-zero without an exception from the library" };
+    }
+    if (!traceEntersTarget(input.trace, input.targetFile)) {
+        return { accept: false, reason: `the traceback never entered ${input.targetFile}` };
+    }
+
+    const cited = standInsDefinedByProbe(input.probeSource).find((name) =>
+        (message || "").includes(name) || input.trace.includes(`'${name}'`) || input.trace.includes(`"${name}"`)
+    );
+    if (cited) {
+        return {
+            accept: false,
+            reason: `the exception names ${cited}, a type the probe defined. The library is rejecting that stand-in`,
+        };
+    }
+
+    return {
+        accept: true,
+        reason: `${type}: ${message || ""}`.trim(),
+        exceptionType: type,
+        exceptionMessage: message,
+    };
+}
+
 export function isEnvironmentalProbeFailure(language: ProjectLanguage, trace: string, _probeFile: string): boolean {
     if (/command not found|ETIMEDOUT|spawnSync \/bin\/sh ETIMEDOUT/.test(trace)) return true;
     if (language === "typescript") {

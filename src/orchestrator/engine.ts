@@ -232,7 +232,7 @@ export class PipelineEngine extends EventEmitter {
                     this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
                 } else {
                     // Fallback to open issues if hunter didn't prove a latent bug
-                    this.emitPipelineEvent("stage:log", "HUNTER", `No latent bug confirmed via probe test. Falling back to open GitHub issues...`);
+                    this.emitPipelineEvent("stage:log", "HUNTER", `No verifiable bug in the audited code. The notes above say why each probe was discarded. Looking at open GitHub issues next.`);
                     const openIssues = await this.github.getOpenBugIssues(targetOwner, targetRepo, 10);
                     if (openIssues.length === 0) {
                         throw new Error(`Hunter found no latent bugs and repository has no open bug reports.`);

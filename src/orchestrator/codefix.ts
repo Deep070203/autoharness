@@ -8,7 +8,7 @@ import { execSync, spawn } from "child_process";
 import type { ReproductionResult } from "./reproduce.js";
 import type { TaskBlackboard } from "./blackboard.js";
 import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
-import { commandTimeoutMs } from "../utils/toolchain.js";
+import { assessProbeFailure, commandTimeoutMs } from "../utils/toolchain.js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -159,6 +159,43 @@ function createCodeTools(repoPath: string, onLog?: (msg: string) => void) {
  */
 import type { LocalizationResult } from "./localize.js";
 
+function readIfExists(filePath: string): string | undefined {
+    if (!fs.existsSync(filePath)) return undefined;
+    return fs.readFileSync(filePath, "utf-8");
+}
+
+/**
+ * The reproduction probe is the proof. Restoring it keeps a later edit of the
+ * probe from making a bad patch look verified.
+ */
+function preserveProbe(
+    repoPath: string,
+    probeRel: string | undefined,
+    original: string | undefined,
+    result: CodeFixResult,
+    onLog?: (msg: string) => void
+): CodeFixResult {
+    if (!probeRel || original === undefined) return result;
+    const abs = path.join(repoPath, probeRel);
+    const current = readIfExists(abs);
+    if (current !== original) {
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, original);
+        onLog?.(`[CodeFix] Restored ${probeRel}. Changing the reproduction is not a fix.`);
+    }
+    const modifiedFiles = result.modifiedFiles.filter((file) => path.normalize(file) !== path.normalize(probeRel));
+    if (result.success && modifiedFiles.length === 0) {
+        onLog?.(`[CodeFix] Rejected a change that only edited the probe.`);
+        return {
+            ...result,
+            success: false,
+            modifiedFiles: [],
+            summary: "The only edit was the reproduction probe. That does not fix the library.",
+        };
+    }
+    return { ...result, modifiedFiles };
+}
+
 export async function runCodeFixAgent(
     reproResult: ReproductionResult,
     contributingMd: string | null,
@@ -170,6 +207,26 @@ export async function runCodeFixAgent(
     onLog?: (msg: string) => void,
     blackboard?: TaskBlackboard
 ): Promise<CodeFixResult> {
+    const probeRel = blackboard?.hunter?.probeFilePath;
+    const probeOriginal = probeRel ? readIfExists(path.join(reproResult.repoPath, probeRel)) : undefined;
+    if (blackboard?.hunter && probeOriginal !== undefined) {
+        const verdict = assessProbeFailure({
+            trace: blackboard.hunter.failureTrace,
+            probeSource: probeOriginal,
+            targetFile: blackboard.hunter.targetFile,
+        });
+        if (!verdict.accept) {
+            onLog?.(`[CodeFix] Not fixing. ${verdict.reason}`);
+            return {
+                success: false,
+                modifiedFiles: [],
+                summary: verdict.reason,
+                testOutput: "",
+                confidence: "LOW",
+            };
+        }
+    }
+
     if (process.env.USE_AGY === "true") {
         onLog?.(`[CodeFix] Attempting autonomous fix via agy CLI...`);
         const agyResult = await runCodeFixAgentWithAgy(
@@ -189,7 +246,7 @@ export async function runCodeFixAgent(
         );
 
         if (agyResult.success && agyResult.modifiedFiles.length > 0 && hasSourceModifications) {
-            return agyResult;
+            return preserveProbe(reproResult.repoPath, probeRel, probeOriginal, agyResult, onLog);
         }
 
         onLog?.(`[CodeFix] agy CLI produced only test files or incomplete changes. Falling back to integrated AI ToolLoopAgent to complete the patch...`);
@@ -248,7 +305,8 @@ ${blackboard.hunter.failureTrace.substring(0, 1500)}
 \`\`\`
 
 MISSION:
-Apply a minimal, surgical fix to ${blackboard.hunter.targetFile} so that \`${blackboard.hunter.probeCommand}\` exits 0!`;
+Apply a minimal, surgical fix to ${blackboard.hunter.targetFile} so that \`${blackboard.hunter.probeCommand}\` exits 0.
+Do not edit the probe file. Do not add a special case for a type that exists only in the probe. The exception in the trace is the bug; do not fix a different story.`;
 
         const absTarget = path.join(reproResult.repoPath, blackboard.hunter.targetFile);
         if (fs.existsSync(absTarget)) {
@@ -336,7 +394,13 @@ Apply the patch using patch_file immediately and verify with run_shell.`;
 
         console.log(`[CodeFix] Modified ${modifiedFiles.length} files: ${modifiedFiles.join(', ')}`);
         onLog?.(`[CodeFix] Fix complete. Modified: ${modifiedFiles.join(', ')}`);
-        return { success: true, modifiedFiles, summary, testOutput, confidence };
+        return preserveProbe(
+            reproResult.repoPath,
+            probeRel,
+            probeOriginal,
+            { success: true, modifiedFiles, summary, testOutput, confidence },
+            onLog
+        );
 
     } catch (e: any) {
         console.error(`[CodeFix] Failed: ${e.message}`);
