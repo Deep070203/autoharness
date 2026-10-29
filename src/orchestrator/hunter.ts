@@ -12,6 +12,7 @@ import {
     detectProject,
     huntExtensions,
     isEnvironmentalProbeFailure,
+    isJsonResponseError,
     probeInstructions,
     resolveProbeFile,
     type ProjectProfile,
@@ -400,7 +401,8 @@ Write a standalone script in the same language. It is executed directly (python 
 - Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
 - Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls.
-- When the bug is present the process must exit non-zero (uncaught exception or sys.exit(1)). When the bug is absent it must exit 0.
+- Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
+- When the bug is present the process must crash with a traceback (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is absent it must exit 0.
 ${outputFormat}`;
 
             const hypothesisPrompt = `
@@ -490,23 +492,22 @@ ${taskSection}
                         failureTrace = [err.stdout, err.stderr, err.message].filter(Boolean).join("\n").substring(0, 3000);
                     }
 
-                    const isEnvironmentalError = focusedLanguage
-                        ? isEnvironmentalProbeFailure(language, failureTrace, probeFileName)
-                        : failureTrace.includes("ModuleNotFoundError") ||
-                            failureTrace.includes("ImportError") ||
-                            failureTrace.includes("command not found") ||
-                            failureTrace.includes("SyntaxError");
+                    const isEnvironmentalError = isEnvironmentalProbeFailure(
+                        focusedLanguage ? language : "python",
+                        failureTrace,
+                        probeFileName
+                    );
 
                     if (isEnvironmentalError) {
                         const lastTraceLine = failureTrace.split("\n").filter((l: string) => l.trim()).slice(-2).join(" | ");
                         const shadowed = failureTrace.includes("partially initialized module") && failureTrace.includes(this.repoPath);
                         log(`Round ${batchIdx + 1}: Probe failed due to environment/import${shadowed ? " (project module shadowed the stdlib)" : ""}: ${lastTraceLine}`);
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         if (attempt === 1) {
                             importFeedback = failureTrace;
                             log(`Round ${batchIdx + 1}: Asking for a corrected standalone probe.`);
                             continue;
                         }
-                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         break;
                     }
 
@@ -527,6 +528,11 @@ ${taskSection}
                         sourceType: "hunted" as const,
                     };
                 } catch (cycleErr: any) {
+                    if (attempt === 1 && isJsonResponseError(String(cycleErr.message || ""))) {
+                        importFeedback = `The previous response was not valid JSON (${cycleErr.message}). Put the probe source in probeCode as a JSON string with escaped quotes and backslashes. Output JSON only.`;
+                        log(`Round ${batchIdx + 1}: Response was not valid JSON. Asking again.`);
+                        continue;
+                    }
                     log(`Round ${batchIdx + 1} error: ${cycleErr.message}`);
                     break;
                 }

@@ -11,6 +11,8 @@ import {
     goProbeFile,
     huntExtensions,
     isEnvironmentalProbeFailure,
+    isJsonResponseError,
+    isPythonSetupFailure,
     rustPackage,
 } from "../src/utils/toolchain.ts";
 
@@ -69,6 +71,25 @@ test("language detection follows the source files, not a side package.json", () 
     assert.equal(crate?.probeFile, "crates/demo/tests/hunted_probe.rs");
     assert.match(crate?.command || "", /--manifest-path crates\/demo\/Cargo.toml/);
     assert.match(crate?.command || "", /--test hunted_probe/);
+});
+
+test("a probe that only reports a missing import is not a Python bug", () => {
+    const trace = [
+        "Could not import prefect_aws.s3.get_s3_client. Ensure prefect-aws is installed and on PYTHONPATH.",
+        "Command failed: python -P probe_get_s3_client_nil_credentials.py",
+        "Could not import prefect_aws.s3.get_s3_client. Ensure prefect-aws is installed and on PYTHONPATH.",
+    ].join("\n");
+    assert.equal(isPythonSetupFailure(trace), true);
+    assert.equal(isEnvironmentalProbeFailure("python", trace, "probe_get_s3_client_nil_credentials.py"), true);
+
+    const bug = [
+        "Traceback (most recent call last):",
+        "  File \"probe.py\", line 4, in <module>",
+        "    get_s3_client()",
+        "pydantic_core._pydantic_core.ValidationError: 1 validation error",
+    ].join("\n");
+    assert.equal(isPythonSetupFailure(bug), false);
+    assert.equal(isJsonResponseError("Bad escaped character in JSON at position 3848 (line 6 column 2681)"), true);
 });
 
 test("typescript probe throws on the bug and a bad import is environmental", () => {

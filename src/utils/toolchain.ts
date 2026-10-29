@@ -370,6 +370,24 @@ export function buildProbeCommand(
     return undefined;
 }
 
+/**
+ * A probe that catches an import failure and prints "Could not import … installed"
+ * exits non-zero without ever calling the code under test. That is not a bug.
+ * A later application exception (ValidationError, AttributeError, …) still counts.
+ */
+export function isPythonSetupFailure(trace: string): boolean {
+    const setup = /ModuleNotFoundError|ImportError|SyntaxError|partially initialized module|No module named|Could not import|cannot import|Ensure .+ installed|DistributionNotFound|is not installed/i;
+    if (!setup.test(trace)) return false;
+    const exceptions = [...trace.matchAll(/^([A-Za-z_][\w.]*(?:Error|Exception)):/gm)].map((match) => match[1]);
+    const last = exceptions[exceptions.length - 1];
+    if (last && !/ImportError|ModuleNotFoundError|SyntaxError/.test(last)) return false;
+    return true;
+}
+
+export function isJsonResponseError(message: string): boolean {
+    return /JSON|Unexpected token|Bad escaped|Unterminated string|Unexpected end of/i.test(message);
+}
+
 export function isEnvironmentalProbeFailure(language: ProjectLanguage, trace: string, _probeFile: string): boolean {
     if (/command not found|ETIMEDOUT|spawnSync \/bin\/sh ETIMEDOUT/.test(trace)) return true;
     if (language === "typescript") {
@@ -383,5 +401,5 @@ export function isEnvironmentalProbeFailure(language: ProjectLanguage, trace: st
         if (/panicked at|assertion failed/.test(trace)) return false;
         return /error\[E|could not compile|cannot find/.test(trace);
     }
-    return /ModuleNotFoundError|ImportError|SyntaxError/.test(trace);
+    return isPythonSetupFailure(trace);
 }
