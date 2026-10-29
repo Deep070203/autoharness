@@ -214,6 +214,7 @@ export async function runCodeFixAgent(
             trace: blackboard.hunter.failureTrace,
             probeSource: probeOriginal,
             targetFile: blackboard.hunter.targetFile,
+            claimedText: blackboard.hunter.title,
         });
         if (!verdict.accept) {
             onLog?.(`[CodeFix] Not fixing. ${verdict.reason}`);

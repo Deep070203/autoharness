@@ -432,6 +432,23 @@ function traceEntersTarget(trace: string, targetFile: string): boolean {
     return trace.replace(/\\/g, "/").includes(normalized);
 }
 
+const REMOTE_EXCEPTION = /Unauthorized|HTTPStatus|ConnectError|ConnectTimeout|ReadTimeout|PoolTimeout|NetworkError|ConnectionError|ConnectionRefusedError|URLError|SSLError|ProxyError/;
+
+/**
+ * A 401 from Prefect Cloud, or any traceback that shows a live HTTP call,
+ * means the probe left the machine. That is an account or network failure.
+ */
+export function remoteServiceFailure(trace: string, type?: string, message?: string): string | undefined {
+    if (type && type !== "panic" && REMOTE_EXCEPTION.test(type)) return type;
+    const blob = `${message || ""}\n${trace}`;
+    return blob.match(/Invalid authentication credentials|401 Unauthorized|403 Forbidden|for url 'https?:\/\/|ECONNREFUSED|ENOTFOUND|getaddrinfo|httpx\._client|httpx\/_client/)?.[0];
+}
+
+function claimedExceptionTypes(claimedText: string): string[] {
+    const found = [...claimedText.matchAll(/\b([A-Za-z_][\w.]*(?:Error|Exception))\b/g)].map((match) => match[1].split(".").pop()!);
+    return [...new Set(found)];
+}
+
 /**
  * A failing probe is a bug only when the library itself raises, inside the
  * file under audit, on an object the probe did not invent.
@@ -442,6 +459,7 @@ export function assessProbeFailure(input: {
     trace: string;
     probeSource: string;
     targetFile: string;
+    claimedText?: string;
 }): ProbeVerdict {
     const fake = probeBuildsFake(input.probeSource);
     if (fake) {
@@ -455,8 +473,27 @@ export function assessProbeFailure(input: {
     if (!type) {
         return { accept: false, reason: "the probe exited non-zero without an exception from the library" };
     }
+
+    const remote = remoteServiceFailure(input.trace, type, message);
+    if (remote) {
+        return {
+            accept: false,
+            reason: `the probe reached a remote service (${remote}). An authentication or network failure is not a bug in the library`,
+        };
+    }
+
     if (!traceEntersTarget(input.trace, input.targetFile)) {
         return { accept: false, reason: `the traceback never entered ${input.targetFile}` };
+    }
+
+    if (input.claimedText && type !== "panic") {
+        const claimed = claimedExceptionTypes(input.claimedText);
+        if (claimed.length > 0 && !claimed.includes(type)) {
+            return {
+                accept: false,
+                reason: `the hypothesis claims ${claimed.join(" or ")}, but the probe raised ${type}: ${message || ""}`.trim(),
+            };
+        }
     }
 
     const cited = standInsDefinedByProbe(input.probeSource).find((name) =>

@@ -404,7 +404,7 @@ Audit the provided code. Look for a realistic function call with plausible input
 Write a standalone script in the same language. It is executed directly (python -P <file> for Python) from the repository root and must finish in under 5 seconds.
 - Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
-- Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls.
+- Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls. A 401, 403, connection error, or any traceback that shows an HTTP request is not a bug.
 - Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
 - Do NOT define a class, mock, fake, stub, or patch. Call the public function with None, "", [], 0, or an object the library itself constructs. A traceback that names a type you defined is your probe, and it will be discarded.
 - When the bug is present the process must crash with a traceback raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is absent it must exit 0.
@@ -510,7 +510,8 @@ ${taskSection}
                         try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         break;
                     } catch (err: any) {
-                        failureTrace = [err.stdout, err.stderr, err.message].filter(Boolean).join("\n").substring(0, 3000);
+                        const combined = [err.stdout, err.stderr, err.message].filter(Boolean).join("\n");
+                        failureTrace = combined.length > 3000 ? combined.slice(-3000) : combined;
                     }
 
                     const isEnvironmentalError = isEnvironmentalProbeFailure(
@@ -537,12 +538,13 @@ ${taskSection}
                         trace: failureTrace,
                         probeSource: probeCode,
                         targetFile: String(parsed.targetFile),
+                        claimedText: `${parsed.title}\n${parsed.explanation || ""}`,
                     });
                     if (!verdict.accept) {
                         log(`Round ${batchIdx + 1}: Not a bug. ${verdict.reason}`);
                         try { fs.unlinkSync(probeAbsPath); } catch (e) {}
                         if (attempt === 1) {
-                            importFeedback = `${verdict.reason}. Call the public function with a value a real caller would pass, and crash inside ${parsed.targetFile}. Do not define a stand-in.`;
+                            importFeedback = `${verdict.reason}. Do not call the network, Prefect Cloud, or a socket, and do not define a stand-in. Call the function with a local value and raise the exception you claim, inside ${parsed.targetFile}.`;
                             continue;
                         }
                         this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): ${verdict.reason}`);
