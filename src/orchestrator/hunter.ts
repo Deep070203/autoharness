@@ -4,7 +4,18 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { BehavioralMemory } from "../utils/memory.js";
-import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
+import { resolveRepoEnv, normalizeCommandWithVenv, primaryPackageName, pythonImportCheckCommand, pythonScriptCommand } from "../utils/env.js";
+import {
+    auditNote,
+    buildProbeCommand,
+    commandTimeoutMs,
+    detectProject,
+    huntExtensions,
+    isEnvironmentalProbeFailure,
+    probeInstructions,
+    resolveProbeFile,
+    type ProjectProfile,
+} from "../utils/toolchain.js";
 
 const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
 
@@ -38,6 +49,7 @@ export interface GroundingContext {
  */
 export class BugHunterAgent {
     private memory: BehavioralMemory;
+    private projectProfile?: ProjectProfile;
 
     constructor(
         private repoPath: string,
@@ -48,6 +60,13 @@ export class BugHunterAgent {
         this.memory = memory || new BehavioralMemory();
     }
 
+    private loadProject(): ProjectProfile {
+        if (!this.projectProfile) {
+            this.projectProfile = detectProject(this.repoPath);
+        }
+        return this.projectProfile;
+    }
+
     /**
      * Step 1: Runs the baseline health check like a professional SWE.
      */
@@ -56,6 +75,12 @@ export class BugHunterAgent {
             console.log(`[Grounding] ${msg}`);
             if (onLog) onLog(msg);
         };
+
+        const profile = this.loadProject();
+        log(`Project language: ${profile.language}.`);
+        if (profile.language === "typescript" || profile.language === "go" || profile.language === "rust") {
+            return this.runLanguageSmoke(profile, log);
+        }
 
         const cached = this.memory.getRepoEnvironment(this.owner, this.repo);
         let runner = cached?.detectedRunner;
@@ -90,6 +115,45 @@ export class BugHunterAgent {
             log(`Discovered virtual environment: ${path.relative(this.repoPath, repoEnv.venvDir)}`);
         }
 
+        // A full-suite run on a popular repo blows the hunt budget and, with a
+        // broken PYTHONPATH, crashes instantly. Confirm the package imports.
+        const pythonPkg = primaryPackageName(this.repoPath, this.repo);
+        const pythonRunner = !runner || /pytest|python/.test(runner);
+        if (pythonPkg && pythonRunner) {
+            if (runner) {
+                log(`Detected test runner \`${runner}\`. Verifying \`import ${pythonPkg}\` instead of the full suite.`);
+            }
+            const importCmd = pythonImportCheckCommand(pythonPkg, repoEnv.pythonBin);
+            if (!importCmd) {
+                return { passed: true, runner, output: "No import check" };
+            }
+            log(`Running import smoke test: \`${importCmd}\`...`);
+            try {
+                const out = execSync(importCmd, {
+                    cwd: this.repoPath,
+                    encoding: "utf-8",
+                    timeout: 45_000,
+                    env: repoEnv.env
+                });
+                log(`✅ Package \`${pythonPkg}\` imports. Hunt environment is usable.`);
+                this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                    detectedRunner: runner,
+                    baselinePassed: true,
+                    lastTestedAt: new Date().toISOString()
+                });
+                return { passed: true, runner, output: out.substring(0, 1500) };
+            } catch (err: any) {
+                const output = (err.stdout || err.stderr || err.message || "").substring(0, 2000);
+                log(`⚠️ \`import ${pythonPkg}\` failed. Probes will be discarded until imports work.\n${output.split("\n").slice(-4).join("\n")}`);
+                this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                    detectedRunner: runner,
+                    baselinePassed: false,
+                    lastTestedAt: new Date().toISOString()
+                });
+                return { passed: false, runner, output };
+            }
+        }
+
         const normalizedRunner = normalizeCommandWithVenv(runner, repoEnv.pythonBin);
         log(`Running baseline test suite: \`${normalizedRunner}\`...`);
         try {
@@ -115,6 +179,50 @@ export class BugHunterAgent {
                 lastTestedAt: new Date().toISOString()
             });
             return { passed: false, runner, output };
+        }
+    }
+
+    /**
+     * TypeScript, Go, and Rust suites are too large to execute during a hunt.
+     * Confirm the compiler or runtime starts, then let the probe test the hypothesis.
+     */
+    private runLanguageSmoke(
+        profile: ProjectProfile,
+        log: (msg: string) => void
+    ): { passed: boolean; runner?: string; output: string } {
+        const repoEnv = resolveRepoEnv(this.repoPath);
+        log(`Detected ${profile.suiteLabel}. Verifying the toolchain instead of the full suite.`);
+        if (profile.language === "typescript" && !fs.existsSync(path.join(this.repoPath, "node_modules"))) {
+            log("node_modules is missing. Probes can still import this repo's source, but third-party imports will fail until dependencies are installed.");
+        }
+        if (!profile.smokeCommand) {
+            return { passed: true, runner: profile.suiteLabel, output: "No smoke command" };
+        }
+        log(`Running toolchain check: \`${profile.smokeCommand}\`...`);
+        try {
+            const out = execSync(profile.smokeCommand, {
+                cwd: this.repoPath,
+                encoding: "utf-8",
+                timeout: profile.smokeTimeoutMs,
+                env: { ...repoEnv.env, CARGO_TERM_COLOR: "never" },
+                stdio: ["ignore", "pipe", "pipe"],
+            });
+            log(`✅ ${profile.language} toolchain is usable.`);
+            this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                detectedRunner: profile.suiteLabel,
+                baselinePassed: true,
+                lastTestedAt: new Date().toISOString(),
+            });
+            return { passed: true, runner: profile.suiteLabel, output: out.substring(0, 1500) };
+        } catch (err: any) {
+            const output = [err.stdout, err.stderr, err.message].filter(Boolean).join("\n").substring(0, 2000);
+            log(`⚠️ Toolchain check failed. Probes that need this compiler will be discarded.\n${output.split("\n").slice(-4).join("\n")}`);
+            this.memory.saveRepoEnvironment(this.owner, this.repo, {
+                detectedRunner: profile.suiteLabel,
+                baselinePassed: false,
+                lastTestedAt: new Date().toISOString(),
+            });
+            return { passed: false, runner: profile.suiteLabel, output };
         }
     }
 
@@ -204,7 +312,7 @@ export class BugHunterAgent {
                 .filter((s) => {
                     if (!s) return false;
                     const ext = path.extname(s);
-                    const isCode = [".ts", ".js", ".py", ".go", ".rs"].includes(ext);
+                    const isCode = huntExtensions(this.loadProject().language).includes(ext);
                     const isIgnored =
                         s.startsWith(".") ||
                         s.includes("/.") ||
@@ -217,6 +325,9 @@ export class BugHunterAgent {
                         s.startsWith("docs/") ||
                         s.startsWith("examples/") ||
                         s.startsWith("benchmarks/") ||
+                        s.startsWith("target/") ||
+                        s.includes("/target/") ||
+                        s.endsWith(".d.ts") ||
                         s.endsWith("__init__.py");
                     return isCode && !isIgnored;
                 });
@@ -257,17 +368,40 @@ export class BugHunterAgent {
             const batchFiles = candidateFiles.slice(batchIdx * batchSize, (batchIdx + 1) * batchSize);
             log(`[Audit Round ${batchIdx + 1}/${numBatches}] Auditing code in: ${batchFiles.join(", ")}`);
 
+            const language = this.loadProject().language;
             const fileSamples = batchFiles.map((relPath) => {
                 const absPath = path.join(this.repoPath, relPath);
                 try {
                     const content = fs.readFileSync(absPath, "utf-8");
-                    return `--- File: ${relPath} ---\n${content.substring(0, 3500)}`;
+                    const note = auditNote(language, this.repoPath, relPath, content);
+                    return `--- File: ${relPath}${note} ---\n${content.substring(0, 3500)}`;
                 } catch (e) {
                     return `--- File: ${relPath} (unreadable) ---`;
                 }
             }).join("\n\n");
 
             const recentCommitsSummary = grounding.recentCommits.slice(0, 5).map(c => `- ${c.hash.substring(0, 7)}: ${c.message}`).join("\n");
+            const focusedLanguage = language === "typescript" || language === "go" || language === "rust";
+            const outputFormat = `
+OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
+{
+  "title": "Conventional Commit title",
+  "archetype": "Type & Nil Panics | Empty Collection Indexing | Boolean Fallback Inversion | In-Place Mutation",
+  "targetFile": "relative/path/to/the file under test",
+  "explanation": "Concrete explanation of the root cause and the minimal fix",
+  "probeCode": "source of the probe",
+  "probeFileName": "path required by the task"
+}`;
+            const taskSection = focusedLanguage
+                ? `${probeInstructions(language, this.repoPath, batchFiles)}\n${outputFormat}`
+                : `TASK:
+Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or unexpected types) that crashes with an unhandled exception.
+Write a standalone script in the same language. It is executed directly (python -P <file> for Python) from the repository root and must finish in under 5 seconds.
+- Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
+- Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
+- Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls.
+- When the bug is present the process must exit non-zero (uncaught exception or sys.exit(1)). When the bug is absent it must exit 0.
+${outputFormat}`;
 
             const hypothesisPrompt = `
 You are an expert security researcher and software engineer finding latent bugs in open-source projects (Breken AI standard).
@@ -287,109 +421,115 @@ ${recentCommitsSummary || "No recent commits found."}
 ### Source Code Samples for this Round:
 ${fileSamples}
 
-TASK:
-Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or unexpected types) that crashes with an unhandled exception.
-Construct an exact standalone executable probe test script in the same language.
-- The probe test must import the function from the package directly.
-- The probe test must NOT require external databases, cloud services, or network calls.
-- The probe test MUST run in < 5 seconds.
-- The probe test must demonstrate the unhandled crash or assertion failure.
-
-OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
-{
-  "title": "Conventional Commit title (e.g. fix(visualization): handle None in get_color_scheme without raising AttributeError)",
-  "archetype": "Type & Nil Panics | Empty Collection Indexing | Boolean Fallback Inversion | In-Place Mutation",
-  "targetFile": "relative/path/to/target_file.py",
-  "explanation": "Concrete explanation of the root cause flaw and the minimal fix",
-  "probeCode": "# Standalone executable test code",
-  "probeFileName": "tests/test_hunted_probe.py",
-  "probeCommand": "python3 tests/test_hunted_probe.py"
-}
+${taskSection}
 `;
 
-            try {
-                const { text } = await generateText({
-                    model: MODEL,
-                    prompt: hypothesisPrompt,
-                    system: "You are an elite Bug Hunter. Output strictly valid JSON only.",
-                });
-
-                const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
-                const parsed = JSON.parse(cleaned);
-
-                if (!parsed.targetFile || !parsed.probeCode || !parsed.probeCommand) {
-                    log(`Round ${batchIdx + 1}: Hypothesis did not yield structured probe. Continuing...`);
-                    continue;
-                }
-
-                log(`Round ${batchIdx + 1}: Hypothesis Formulated: "${parsed.title}" in ${parsed.targetFile}`);
-                log(`Writing probe test file to ${parsed.probeFileName}...`);
-
-                const probeAbsPath = path.join(this.repoPath, parsed.probeFileName);
-                fs.mkdirSync(path.dirname(probeAbsPath), { recursive: true });
-                fs.writeFileSync(probeAbsPath, parsed.probeCode, "utf-8");
-
-                // Execute probe with full environment
-                const repoEnv = resolveRepoEnv(this.repoPath);
-                let probeCmd = normalizeCommandWithVenv(parsed.probeCommand, repoEnv.pythonBin);
-                if (probeCmd.startsWith("python ")) {
-                    probeCmd = probeCmd.replace(/^python /, "python3 ");
-                }
-
-                log(`Executing probe command: ${probeCmd}`);
-                let failureTrace = "";
-                let probeExitedWithError = false;
-
+            let importFeedback = "";
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                const retryHint = focusedLanguage
+                    ? "Follow the probe file name, package, and import rules exactly."
+                    : "Do not modify sys.path. Import the public package only.";
+                const prompt = importFeedback
+                    ? `${hypothesisPrompt}\n\nThe previous probe failed before it could reach the hypothesis. Rewrite it and output JSON again.\n${retryHint}\nFailure:\n${importFeedback.slice(0, 1500)}\n`
+                    : hypothesisPrompt;
                 try {
-                    execSync(probeCmd, {
-                        cwd: this.repoPath,
-                        encoding: "utf-8",
-                        timeout: 30_000,
-                        env: repoEnv.env,
+                    const { text } = await generateText({
+                        model: MODEL,
+                        prompt,
+                        system: "You are an elite Bug Hunter. Output strictly valid JSON only.",
                     });
-                    log(`Round ${batchIdx + 1}: Probe test passed (exit 0). Hypothesis discarded (Zero False Positives).`);
-                    this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile);
-                    try { fs.unlinkSync(probeAbsPath); } catch (e) {}
-                    continue;
-                } catch (err: any) {
-                    failureTrace = (err.stdout || err.stderr || err.message).substring(0, 3000);
-                    probeExitedWithError = true;
+
+                    const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+                    const parsed = JSON.parse(cleaned);
+                    const requestedName = typeof parsed.probeFileName === "string" ? parsed.probeFileName : "";
+                    const probeFileName = focusedLanguage
+                        ? resolveProbeFile(language, this.repoPath, String(parsed.targetFile || ""), requestedName)
+                        : (requestedName || "tests/test_hunted_probe.py");
+
+                    if (!parsed.targetFile || !parsed.probeCode || !probeFileName || probeFileName.includes("..") || path.isAbsolute(probeFileName)) {
+                        log(`Round ${batchIdx + 1}: Hypothesis did not yield structured probe. Continuing...`);
+                        break;
+                    }
+
+                    log(`Round ${batchIdx + 1}: Hypothesis Formulated: "${parsed.title}" in ${parsed.targetFile}`);
+                    log(`Writing probe test file to ${probeFileName}...`);
+
+                    const probeCode = String(parsed.probeCode).replace(/^```[a-z]*\n/i, "").replace(/\n```$/, "");
+                    const probeAbsPath = path.join(this.repoPath, probeFileName);
+                    fs.mkdirSync(path.dirname(probeAbsPath), { recursive: true });
+                    fs.writeFileSync(probeAbsPath, probeCode, "utf-8");
+
+                    const repoEnv = resolveRepoEnv(this.repoPath);
+                    const ext = path.extname(probeFileName);
+                    const probeCmd = focusedLanguage
+                        ? buildProbeCommand(language, this.repoPath, String(parsed.targetFile))
+                        : ext === ".py" || ext === ""
+                            ? pythonScriptCommand(probeFileName, repoEnv.pythonBin)
+                            : normalizeCommandWithVenv(parsed.probeCommand || `node ${probeFileName}`, repoEnv.pythonBin);
+                    if (!probeCmd) {
+                        log(`Round ${batchIdx + 1}: No probe command for ${language}. Continuing...`);
+                        break;
+                    }
+
+                    log(`Executing probe command: ${probeCmd}`);
+                    let failureTrace = "";
+
+                    try {
+                        execSync(probeCmd, {
+                            cwd: this.repoPath,
+                            encoding: "utf-8",
+                            timeout: commandTimeoutMs(probeCmd, 30_000),
+                            env: { ...repoEnv.env, CARGO_TERM_COLOR: "never" },
+                            stdio: ["ignore", "pipe", "pipe"],
+                        });
+                        log(`Round ${batchIdx + 1}: Probe test passed (exit 0). Hypothesis discarded (Zero False Positives).`);
+                        this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile);
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
+                        break;
+                    } catch (err: any) {
+                        failureTrace = [err.stdout, err.stderr, err.message].filter(Boolean).join("\n").substring(0, 3000);
+                    }
+
+                    const isEnvironmentalError = focusedLanguage
+                        ? isEnvironmentalProbeFailure(language, failureTrace, probeFileName)
+                        : failureTrace.includes("ModuleNotFoundError") ||
+                            failureTrace.includes("ImportError") ||
+                            failureTrace.includes("command not found") ||
+                            failureTrace.includes("SyntaxError");
+
+                    if (isEnvironmentalError) {
+                        const lastTraceLine = failureTrace.split("\n").filter((l: string) => l.trim()).slice(-2).join(" | ");
+                        const shadowed = failureTrace.includes("partially initialized module") && failureTrace.includes(this.repoPath);
+                        log(`Round ${batchIdx + 1}: Probe failed due to environment/import${shadowed ? " (project module shadowed the stdlib)" : ""}: ${lastTraceLine}`);
+                        if (attempt === 1) {
+                            importFeedback = failureTrace;
+                            log(`Round ${batchIdx + 1}: Asking for a corrected standalone probe.`);
+                            continue;
+                        }
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
+                        break;
+                    }
+
+                    log(`🎯 PROBE FAILED AS HYPOTHESIZED! Real latent bug confirmed!\n${failureTrace.substring(0, 400)}`);
+                    this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile, {
+                        title: parsed.title,
+                        targetFile: parsed.targetFile
+                    });
+
+                    return {
+                        title: parsed.title,
+                        description: parsed.explanation,
+                        archetype: parsed.archetype,
+                        targetFile: parsed.targetFile,
+                        probeFilePath: probeFileName,
+                        probeCommand: probeCmd,
+                        failureTrace,
+                        sourceType: "hunted" as const,
+                    };
+                } catch (cycleErr: any) {
+                    log(`Round ${batchIdx + 1} error: ${cycleErr.message}`);
+                    break;
                 }
-
-                // Verify the nature of the error
-                const isEnvironmentalError =
-                    failureTrace.includes("ModuleNotFoundError") ||
-                    failureTrace.includes("ImportError") ||
-                    failureTrace.includes("command not found") ||
-                    failureTrace.includes("SyntaxError");
-
-                if (isEnvironmentalError) {
-                    const lastTraceLine = failureTrace.split('\n').filter(l => l.trim()).slice(-2).join(' | ');
-                    log(`Round ${batchIdx + 1}: Probe failed due to environment/import: ${lastTraceLine}`);
-                    try { fs.unlinkSync(probeAbsPath); } catch (e) {}
-                    continue;
-                }
-
-                // If it reached here, we have a GENUINE application crash!
-                log(`🎯 PROBE FAILED AS HYPOTHESIZED! Real latent bug confirmed!\n${failureTrace.substring(0, 400)}`);
-                this.memory.recordProbeHistory(this.owner, this.repo, parsed.targetFile, {
-                    title: parsed.title,
-                    targetFile: parsed.targetFile
-                });
-
-                return {
-                    title: parsed.title,
-                    description: parsed.explanation,
-                    archetype: parsed.archetype,
-                    targetFile: parsed.targetFile,
-                    probeFilePath: parsed.probeFileName,
-                    probeCommand: probeCmd,
-                    failureTrace,
-                    sourceType: "hunted",
-                };
-
-            } catch (cycleErr: any) {
-                log(`Round ${batchIdx + 1} error: ${cycleErr.message}`);
             }
         }
 

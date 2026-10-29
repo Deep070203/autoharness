@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
+import { commandTimeoutMs, detectProject } from "../utils/toolchain.js";
 
 export interface VerificationResult {
     passed: boolean;
@@ -37,7 +38,7 @@ export async function runVerification(
             const out = execSync(cmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
-                timeout: 90_000,
+                timeout: commandTimeoutMs(cmd, 90_000),
                 env: repoEnv.env
             });
             reproOutput = out.substring(0, 4000);
@@ -75,10 +76,22 @@ export async function runVerification(
     let regressionPassed = true;
     let regressionOutput = "";
 
-    // Determine default test runner if not provided
+    // Determine default test runner if not provided.
+    // TypeScript, Go, and Rust full suites do not finish on large repositories.
     let testCmd = customTestCommand;
+    let regressionIsSmoke = false;
     if (!testCmd) {
-        testCmd = detectTestCommand(repoPath);
+        const profile = detectProject(repoPath);
+        if (
+            (profile.language === "typescript" || profile.language === "go" || profile.language === "rust")
+            && profile.smokeCommand
+        ) {
+            testCmd = profile.smokeCommand;
+            regressionIsSmoke = true;
+            console.log(`[Verifier] Skipping the full ${profile.suiteLabel} suite. Toolchain smoke: ${testCmd}`);
+        } else {
+            testCmd = detectTestCommand(repoPath);
+        }
     }
 
     if (testCmd) {
@@ -88,7 +101,7 @@ export async function runVerification(
             const out = execSync(testCmd, {
                 cwd: repoPath,
                 encoding: "utf-8",
-                timeout: 90_000,
+                timeout: commandTimeoutMs(testCmd, 90_000),
                 env: repoEnv.env
             });
             regressionOutput = out.substring(0, 3000);
@@ -112,7 +125,9 @@ export async function runVerification(
         reproOutput,
         regressionOutput,
         summary: passed
-            ? "All verification checks passed cleanly (reproduction + regressions)."
+            ? regressionIsSmoke
+                ? "Reproduction passed. Toolchain smoke passed. The full test suite was not run."
+                : "All verification checks passed cleanly (reproduction + regressions)."
             : `Verification completed. Repro passed: ${reproPassed}, Regressions passed: ${regressionPassed}`
     };
 }

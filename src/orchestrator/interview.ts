@@ -4,10 +4,42 @@ import { GitHubService } from "../utils/github.js";
 
 const MODEL: LanguageModel = google("gemini-3.8-flash") as unknown as LanguageModel;
 
+export interface ViabilityVerdict {
+    keep: boolean;
+    reason: string;
+    /** The model request itself failed. Distinct from a deliberate DROP. */
+    modelError?: boolean;
+}
+
+/**
+ * Reads the last DECISION line. A bug report is not a patch, so a model that
+ * mentions both words must be scored on the decision it actually ends with.
+ */
+export function parseViabilityDecision(text: string): { keep: boolean; reason: string } {
+    const decisions = [...text.matchAll(/DECISION:\s*(KEEP|DROP)\b/gi)];
+    if (decisions.length === 0) {
+        const snippet = text.replace(/\s+/g, " ").trim().slice(0, 300);
+        return {
+            keep: false,
+            reason: snippet
+                ? `No DECISION line. Model said: ${snippet}`
+                : "Viability model returned an empty response.",
+        };
+    }
+    const last = decisions[decisions.length - 1];
+    const keep = last[1].toUpperCase() === "KEEP";
+    const reasonLine = text.match(/REASON:\s*(.+)/i);
+    let reason = reasonLine?.[1]?.trim() ?? "";
+    if (!reason) {
+        const before = text.slice(0, last.index).replace(/\s+/g, " ").trim();
+        reason = before.slice(-300) || (keep ? "Kept." : "Dropped.");
+    }
+    return { keep, reason: reason.slice(0, 500) };
+}
+
 /**
  * Handles the "Ouroboros Interview" step.
- * An LLM is asked to review the candidate PR/diff and the repo's CONTRIBUTING.md,
- * then decide whether the agent should pursue it as a branching candidate.
+ * Decides whether an open issue is a concrete code defect an agent can patch.
  */
 export async function runOuroborosInterview(
     candidate: any,
@@ -15,49 +47,57 @@ export async function runOuroborosInterview(
     github: GitHubService,
     owner: string,
     repo: string
-): Promise<boolean> {
+): Promise<ViabilityVerdict> {
     console.log(`\n🤖 Running Ouroboros Viability Interview for: ${candidate.title}`);
 
-    // If available, we would pull the full diff string here using `github.octokit.pulls.get()`
-    // For now, we use the body and title
+    const labels = Array.isArray(candidate.labels) && candidate.labels.length > 0
+        ? candidate.labels.join(", ")
+        : "none";
+    const body = (candidate.body || "No body provided.").slice(0, 7000);
+
     const prompt = `
-You are an expert open-source maintainer acting as an initial viability filter.
-Your goal is to decide if a given bug fix or patch is appropriate for an AI agent to build a variation of, or learn from.
+You are an expert open-source maintainer deciding whether an autonomous coding agent should open a pull request for this GitHub issue.
 
-We only want to pursue candidates that resolve clear, reproducible bugs or security issues or project analysis or docunetation changes work.
-We can also have features, sprawling refactors, UI tweaks, or changes but they should not be in conflict with project philosophy.
+This candidate is an open issue, not an existing patch. Do not drop it for lacking a diff.
 
-### Candidate PR:
+KEEP when the report describes a concrete defect in the project's code:
+- a crash, wrong result, data loss, security bug, or race with a described sequence
+- enough detail that an engineer could find the named functions and write a focused test
+A bug does not need an existing patch, a one-line repro command, or a running cluster.
+Timing and concurrency bugs that name the functions involved are KEEP.
+
+DROP when:
+- it is a feature request, question, roadmap item, or design discussion
+- it needs private credentials, a production account, or unpublished customer data and cannot be unit-tested
+- there is no identifiable code behavior to change
+- it is a duplicate or a wontfix
+
+### Candidate issue:
 Title: ${candidate.title}
 URL: ${candidate.url}
+Labels: ${labels}
 Body:
-${candidate.body || "No body provided."}
+${body}
 
-### CONTRIBUTING.md Snippet:
-${contributingMd ? contributingMd.substring(0, 2000) : "No contributing guidelines found."}
+### CONTRIBUTING.md snippet:
+${contributingMd ? contributingMd.substring(0, 1200) : "No contributing guidelines found."}
 
 ### Task:
-Evaluate this candidate. Does this represent a clear, intentional bug fix or a documentation change that is suitable for a secondary agent to reproduce locally and draft a similar fix for?
-You must end your response with exactly "DECISION: KEEP" or "DECISION: DROP".
+On its own line write: REASON: <one sentence>
+End with exactly one of: DECISION: KEEP or DECISION: DROP
 `;
 
     try {
         const { text } = await generateText({
             model: MODEL,
             prompt: prompt,
-            system: "You are the Ouroboros gating agent. Be strict and protect the pipeline from noise.",
+            system: "You gate an autonomous bug-fix agent. Keep concrete code defects. Drop noise. The candidate is an issue, not a pull request.",
         });
 
         console.log(`[Interview Result]:\n${text}`);
-
-        if (text.includes("DECISION: KEEP")) {
-            return true;
-        } else {
-            return false;
-        }
-
+        return parseViabilityDecision(text);
     } catch (e: any) {
         console.error(`Ouroboros Interview failed: ${e.message}`);
-        return false; // Fail secure
+        return { keep: false, reason: e.message || "model request failed", modelError: true };
     }
 }

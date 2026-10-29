@@ -122,11 +122,17 @@ export class PipelineEngine extends EventEmitter {
 
                 this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
 
-                // Viability interview
+                // Viability interview. An explicit issue number is a request to try it.
                 this.emitPipelineEvent("stage:start", "INTERVIEW", { title: candidate.title });
                 const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
-                const isViable = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
-                this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: isViable });
+                const verdict = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
+                const interviewNote = verdict.modelError
+                    ? `Interview model error (${verdict.reason}). Continuing because an issue number was requested.`
+                    : verdict.keep
+                        ? `Viability filter kept this issue. ${verdict.reason}`
+                        : `Viability filter would drop this issue (${verdict.reason}). Continuing because an issue number was requested.`;
+                this.emitPipelineEvent("stage:log", "INTERVIEW", interviewNote);
+                this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: verdict.keep, reason: verdict.reason });
 
                 // Setup local workspace & analysis
                 this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
@@ -232,28 +238,44 @@ export class PipelineEngine extends EventEmitter {
                         throw new Error(`Hunter found no latent bugs and repository has no open bug reports.`);
                     }
 
-                    const first = openIssues[0];
-                    candidate = {
-                        number: first.number,
-                        pull_number: first.number,
-                        title: first.title,
-                        body: first.body || "",
-                        url: first.html_url,
-                        author: first.user?.login || "unknown",
-                        labels: first.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
-                        sourceType: "issue"
-                    };
+                    this.emitPipelineEvent("stage:complete", "SCOUT", { fallback: true, openIssues: openIssues.length });
 
-                    this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
-
-                    // Viability interview
-                    this.emitPipelineEvent("stage:start", "INTERVIEW", { title: candidate.title });
+                    // Review several bug reports. One DROP used to abort the whole run.
+                    this.emitPipelineEvent("stage:start", "INTERVIEW", { candidates: openIssues.length });
                     const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
-                    const isViable = await runOuroborosInterview(candidate, contributingMd, this.github, targetOwner, targetRepo);
-                    if (!isViable) {
-                        throw new Error(`Fallback candidate #${candidate.number} was dropped by viability filter.`);
+                    const maxReviews = Math.min(openIssues.length, 5);
+                    let lastDrop = "";
+                    candidate = null;
+                    for (let i = 0; i < maxReviews; i++) {
+                        const issue = openIssues[i];
+                        const next = {
+                            number: issue.number,
+                            pull_number: issue.number,
+                            title: issue.title,
+                            body: issue.body || "",
+                            url: issue.html_url,
+                            author: issue.user?.login || "unknown",
+                            labels: issue.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
+                            sourceType: "issue"
+                        };
+                        this.emitPipelineEvent("stage:log", "INTERVIEW", `Reviewing issue #${next.number}: ${next.title}`);
+                        const verdict = await runOuroborosInterview(next, contributingMd, this.github, targetOwner, targetRepo);
+                        if (verdict.modelError) {
+                            throw new Error(`Viability interview failed: ${verdict.reason}`);
+                        }
+                        if (verdict.keep) {
+                            candidate = next;
+                            this.emitPipelineEvent("stage:log", "INTERVIEW", `Keeping #${next.number}. ${verdict.reason}`);
+                            this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: true, issue: next.number, reason: verdict.reason });
+                            break;
+                        }
+                        lastDrop = `#${next.number}: ${verdict.reason}`;
+                        this.emitPipelineEvent("stage:log", "INTERVIEW", `Dropped #${next.number}. ${verdict.reason}`);
                     }
-                    this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: true });
+                    if (!candidate) {
+                        this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: false, reason: lastDrop });
+                        throw new Error(`No open issue survived the viability filter after ${maxReviews} review(s). Last drop ${lastDrop}`);
+                    }
 
                     this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
                     reproResult = await analyzeIssueLocally(candidate, this.github, targetOwner, targetRepo);

@@ -380,7 +380,7 @@ If no generalizable rule can be extracted, output "NONE".
             fs.writeFileSync(path.join(propDir, "patch.diff"), proposal.diff, "utf-8");
         }
         if (probeCode) {
-            fs.writeFileSync(path.join(propDir, "probe_test.py"), probeCode, "utf-8");
+            fs.writeFileSync(path.join(propDir, "probe_test.txt"), probeCode, "utf-8");
         }
 
         // Maintain index in proposals.json
@@ -490,8 +490,10 @@ If no generalizable rule can be extracted, output "NONE".
             if (fs.existsSync(diffPath)) {
                 diff = fs.readFileSync(diffPath, "utf-8");
             }
-            const probePath = path.join(propDir, "probe_test.py");
-            if (fs.existsSync(probePath)) {
+            const probePath = ["probe_test.txt", "probe_test.py"]
+                .map((name) => path.join(propDir, name))
+                .find((candidate) => fs.existsSync(candidate));
+            if (probePath) {
                 probeCode = fs.readFileSync(probePath, "utf-8");
             }
             return { record, diff, probeCode };
