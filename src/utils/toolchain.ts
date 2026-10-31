@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { listTrackedFiles } from "./hunt-scope.js";
 
 const require = createRequire(import.meta.url);
 
@@ -21,17 +22,12 @@ const SKIP_WALK = new Set([
 ]);
 
 function listFiles(repoPath: string): string[] {
-    try {
-        const out = execSync("git ls-files", {
-            cwd: repoPath,
-            encoding: "utf-8",
-            timeout: 15_000,
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-        const tracked = out.split("\n").map((line) => line.trim()).filter(Boolean);
-        if (tracked.length > 0) return tracked;
-    } catch {
-        // Fixture directories and fresh clones that are not git repos yet.
+    if (fs.existsSync(path.join(repoPath, ".git"))) {
+        // A failed listing must not walk the working tree. supabase/supabase
+        // is large enough that a walk looks like a hang.
+        const tracked = listTrackedFiles(repoPath);
+        if (tracked) return tracked;
+        return [];
     }
 
     const found: string[] = [];
@@ -194,8 +190,16 @@ function typescriptSmokeCommand(): string {
     return `${typescriptRunnerPrefix()} -e "process.stdout.write('ok')"`;
 }
 
-export function typescriptProbeCommand(): string {
-    return `${typescriptRunnerPrefix()} tests/test_hunted_probe.ts`;
+/** Beside the file under test, the way a package test lives next to its source. */
+export function typescriptProbeFile(targetFile: string): string {
+    const normalized = safeRelative(targetFile);
+    if (!normalized) return "hunted_probe.test.ts";
+    const dir = path.posix.dirname(normalized);
+    return dir === "." ? "hunted_probe.test.ts" : `${dir}/hunted_probe.test.ts`;
+}
+
+export function typescriptProbeCommand(targetFile: string): string {
+    return `${typescriptRunnerPrefix()} ${shellQuote(typescriptProbeFile(targetFile))}`;
 }
 
 function safeRelative(file: string): string | undefined {
@@ -280,23 +284,27 @@ export function auditNote(language: ProjectLanguage, repoPath: string, relPath: 
         return ` [Rust crate \`${crate.name}\`, probe ${crate.probeFile}, \`use ${crate.name}::...\`]`;
     }
     if (language === "typescript") {
-        return " [TypeScript probe: tests/test_hunted_probe.ts, relative import, no extension]";
+        return ` [TypeScript probe: ${typescriptProbeFile(relPath)}, relative import, no extension]`;
     }
     return "";
 }
 
 export function probeInstructions(language: ProjectLanguage, repoPath: string, batchFiles: string[]): string {
     if (language === "typescript") {
+        const hints = batchFiles.map((file) => `- ${file}: probe ${typescriptProbeFile(file)}`).join("\n");
         return `
 TASK:
-The samples are TypeScript. Find a realistic call that throws (TypeError, RangeError, or a failed invariant).
-Write tests/test_hunted_probe.ts. It is executed with tsx from the repository root.
-- ESM import/export. Import the target with a relative path and NO file extension, for example import { fn } from "../src/lib".
+The samples are TypeScript. Find a realistic call that throws, or a call that returns the wrong value.
+Write the probe beside the target file (src/lib.ts -> src/hunted_probe.test.ts). It is executed with tsx from the repository root.
+- ESM import/export. Import the target with a relative path and NO file extension, for example import { fn } from "./lib".
 - Call the imported function. An unused import is deleted before the file runs, and the probe then exits 0.
+- A wrong result is a bug even when nothing throws. Assert the correct result. The process must exit non-zero on the current code and 0 once the code is fixed. Do not assert a constant such as true or 1 === 2.
 - Do not use path aliases, vitest, jest, mocha, or a test runner.
-- Do not catch the exception you are trying to prove. process.exit(1) or an uncaught throw when the bug is present. Exit 0 when it is not.
-- No network and no watch mode.
-probeFileName must be "tests/test_hunted_probe.ts".
+- Do not catch the exception you are trying to prove. An uncaught throw when the bug is a crash. Exit 0 when the behavior is already correct.
+- No network and no watch mode. Keep the probe; it is the regression test.
+Files in this round:
+${hints}
+probeFileName must be the hunted_probe.test.ts path next to targetFile.
 `;
     }
     if (language === "go") {
@@ -311,7 +319,7 @@ probeFileName must be "tests/test_hunted_probe.ts".
         }).join("\n");
         return `
 TASK:
-The samples are Go. Find a realistic call that panics (nil pointer, index out of range, or a bad type assertion).
+The samples are Go. Find a realistic call that panics, or a call that returns the wrong value. Assert the correct result when nothing panics. The test must fail on the current code.
 Write a test in the SAME directory as targetFile, named hunted_probe_test.go.
 - Use the same package clause as the target file, not package foo_test.
 - The test function must be named TestHuntedProbe.
@@ -331,7 +339,7 @@ probeFileName must be the hunted_probe_test.go path next to targetFile.
         }).join("\n");
         return `
 TASK:
-The samples are Rust. Find a realistic call that panics or returns a wrong Result.
+The samples are Rust. Find a realistic call that panics or returns the wrong value. Assert the correct result. The test must fail on the current code.
 Write an integration test at the probe path for the crate that contains targetFile. The test function must be named hunted_probe.
 - Call the public API: use <crate_name>::...
 - Do not catch the panic with catch_unwind. assert! or panic! when the bug is present. The test passes when the bug is absent.
@@ -350,7 +358,7 @@ export function resolveProbeFile(
     targetFile: string,
     requested?: string
 ): string | undefined {
-    if (language === "typescript") return "tests/test_hunted_probe.ts";
+    if (language === "typescript") return typescriptProbeFile(targetFile);
     if (language === "go") return goProbeFile(targetFile);
     if (language === "rust") return rustPackage(repoPath, targetFile)?.probeFile
         || (requested && safeRelative(requested))
@@ -364,7 +372,7 @@ export function buildProbeCommand(
     repoPath: string,
     targetFile: string
 ): string | undefined {
-    if (language === "typescript") return typescriptProbeCommand();
+    if (language === "typescript") return typescriptProbeCommand(targetFile);
     if (language === "go") return goProbeCommand(targetFile);
     if (language === "rust") return rustPackage(repoPath, targetFile)?.command;
     return undefined;
@@ -427,6 +435,24 @@ export function parseTraceException(trace: string): { type?: string; message?: s
     return {};
 }
 
+/**
+ * Expected versus actual. A bare "AssertionError" or `assert False` does not qualify.
+ */
+export function isBehaviorAssertion(trace: string): boolean {
+    return /left:\s*|right:\s*|expected\b|received\b|AssertionError:\s*assert\s+\S+\s*==|assertion (`left| failed)|Assertion with/i.test(trace);
+}
+
+/** The probe has to call the library. Asserting a constant does not. */
+export function probeTouchesLibrary(probeSource: string, targetFile: string): boolean {
+    const stem = path.posix.basename(targetFile).replace(/\.[^.]+$/, "");
+    if (stem.length >= 3 && probeSource.toLowerCase().includes(stem.toLowerCase())) return true;
+    const ignored = /^(assert|expect|require|check|refute|it|test|describe|fatal|errorf|fatalf|error|log|logf|run|skip)$/i;
+    for (const match of probeSource.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+        if (!ignored.test(match[1])) return true;
+    }
+    return false;
+}
+
 function traceEntersTarget(trace: string, targetFile: string): boolean {
     const normalized = targetFile.replace(/\\/g, "/");
     return trace.replace(/\\/g, "/").includes(normalized);
@@ -470,9 +496,7 @@ export function assessProbeFailure(input: {
     }
 
     const { type, message } = parseTraceException(input.trace);
-    if (!type) {
-        return { accept: false, reason: "the probe exited non-zero without an exception from the library" };
-    }
+    const assertion = isBehaviorAssertion(input.trace);
 
     const remote = remoteServiceFailure(input.trace, type, message);
     if (remote) {
@@ -482,11 +506,33 @@ export function assessProbeFailure(input: {
         };
     }
 
+    // A wrong result often fails in the test, not inside the library.
+    // storage's signed-url test, supabase-py's channel test, etl's OID
+    // assertion, and PostHogFeature's fallback test all work this way.
+    if (assertion && (type === "AssertionError" || !traceEntersTarget(input.trace, input.targetFile))) {
+        if (!probeTouchesLibrary(input.probeSource, input.targetFile)) {
+            return {
+                accept: false,
+                reason: "the assertion does not call the library. A constant comparison is not a bug",
+            };
+        }
+        return {
+            accept: true,
+            reason: `the current code fails the behavior test: ${(message || input.trace).trim().slice(0, 180)}`,
+            exceptionType: type || "AssertionError",
+            exceptionMessage: message,
+        };
+    }
+
+    if (!type) {
+        return { accept: false, reason: "the probe exited non-zero without an exception from the library" };
+    }
+
     if (!traceEntersTarget(input.trace, input.targetFile)) {
         return { accept: false, reason: `the traceback never entered ${input.targetFile}` };
     }
 
-    if (input.claimedText && type !== "panic") {
+    if (input.claimedText && type !== "panic" && type !== "AssertionError") {
         const claimed = claimedExceptionTypes(input.claimedText);
         if (claimed.length > 0 && !claimed.includes(type)) {
             return {

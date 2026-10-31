@@ -19,6 +19,7 @@ import {
     resolveProbeFile,
     type ProjectProfile,
 } from "../utils/toolchain.js";
+import { selectHuntScope } from "../utils/hunt-scope.js";
 
 const MODEL: LanguageModel = google("gemini-2.5-flash") as unknown as LanguageModel;
 
@@ -307,39 +308,32 @@ export class BugHunterAgent {
             log(`Identified ${grounding.churnedFiles.length} recently churned files: ${grounding.churnedFiles.slice(0, 5).join(", ")}`);
         }
 
-        // 3. Discover and rank candidate core source files
-        let allSourceFiles: string[] = [];
-        try {
-            const ls = execSync("git ls-files", { cwd: this.repoPath, encoding: "utf-8", timeout: 10_000 });
-            allSourceFiles = ls
-                .split("\n")
-                .map((s) => s.trim())
-                .filter((s) => {
-                    if (!s) return false;
-                    const ext = path.extname(s);
-                    const isCode = huntExtensions(this.loadProject().language).includes(ext);
-                    const isIgnored =
-                        s.startsWith(".") ||
-                        s.includes("/.") ||
-                        s.toLowerCase().includes("test") ||
-                        s.toLowerCase().includes("spec") ||
-                        s.includes("vendor/") ||
-                        s.includes("dist/") ||
-                        s.includes("node_modules/") ||
-                        s.startsWith("scripts/") ||
-                        s.startsWith("docs/") ||
-                        s.startsWith("examples/") ||
-                        s.startsWith("benchmarks/") ||
-                        s.startsWith("target/") ||
-                        s.includes("/target/") ||
-                        s.endsWith(".d.ts") ||
-                        s.endsWith("__init__.py");
-                    return isCode && !isIgnored;
-                });
-        } catch (e) {
-            log("Could not enumerate files.");
-            return null;
-        }
+        // 3. One package, not the whole tree. A monorepo listing either
+        // blows the buffer or audits code the probe can never run.
+        const scope = selectHuntScope(this.repoPath, grounding.churnedFiles);
+        log(scope.reason);
+        const allSourceFiles = scope.files.filter((s) => {
+            if (!s) return false;
+            const ext = path.extname(s);
+            const isCode = huntExtensions(this.loadProject().language).includes(ext);
+            const isIgnored =
+                s.startsWith(".") ||
+                s.includes("/.") ||
+                s.toLowerCase().includes("test") ||
+                s.toLowerCase().includes("spec") ||
+                s.includes("vendor/") ||
+                s.includes("dist/") ||
+                s.includes("node_modules/") ||
+                s.startsWith("scripts/") ||
+                s.startsWith("docs/") ||
+                s.startsWith("examples/") ||
+                s.startsWith("benchmarks/") ||
+                s.startsWith("target/") ||
+                s.includes("/target/") ||
+                s.endsWith(".d.ts") ||
+                s.endsWith("__init__.py");
+            return isCode && !isIgnored;
+        });
 
         if (allSourceFiles.length === 0) {
             log("No eligible source code files found to audit.");
@@ -386,6 +380,9 @@ export class BugHunterAgent {
             }).join("\n\n");
 
             const recentCommitsSummary = grounding.recentCommits.slice(0, 5).map(c => `- ${c.hash.substring(0, 7)}: ${c.message}`).join("\n");
+            const scopeNote = scope.root === "."
+                ? ""
+                : `\n### Hunt scope\nAudit only \`${scope.root}\`. Write the probe inside this package. It must fail on the current code because a caller gets the wrong result or a crash. Keep the probe; it is the regression test. Do not look for an open issue to patch instead.\n`;
             const focusedLanguage = language === "typescript" || language === "go" || language === "rust";
             const outputFormat = `
 OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
@@ -402,18 +399,19 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
                 : `TASK:
 Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or unexpected types) that crashes with an unhandled exception.
 Write a standalone script in the same language. It is executed directly (python -P <file> for Python) from the repository root and must finish in under 5 seconds.
+A wrong return value is a bug. Assert the correct result so the script fails on the current code and passes once the code is fixed. Do not assert a constant.
 - Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
 - Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls. A 401, 403, connection error, or any traceback that shows an HTTP request is not a bug.
 - Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
 - Do NOT define a class, mock, fake, stub, or patch. Call the public function with None, "", [], 0, or an object the library itself constructs. A traceback that names a type you defined is your probe, and it will be discarded.
-- When the bug is present the process must crash with a traceback raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is absent it must exit 0.
+- When the bug is a crash, the traceback must be raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is a wrong result, assert the correct value so the current code fails. When the behavior is already correct, exit 0.
 ${outputFormat}`;
 
             const hypothesisPrompt = `
 You are an expert security researcher and software engineer finding latent bugs in open-source projects (Breken AI standard).
 
-A bug is a crash inside the library on a value a real caller can pass. If the only way to make it crash is to pass an object you defined, there is no bug. Say what the code actually does.
+A bug is a wrong result or a crash inside the library on a value a real caller can pass. A wrong result still returns: the probe asserts the correct value and fails on the current code. If the only way to make it crash is to pass an object you defined, there is no bug. Say what the code actually does.
 
 ### 7 High-Yield Bug Archetypes:
 1. Type & Nil Panics: Passing valid/common edge-case types (None/null, empty strings, numbers, dicts, instances) to functions that fail to validate input and raise unhandled AttributeError or TypeError.
@@ -426,6 +424,7 @@ A bug is a crash inside the library on a value a real caller can pass. If the on
 
 ### Recent Commit Context:
 ${recentCommitsSummary || "No recent commits found."}
+${scopeNote}
 
 ### Source Code Samples for this Round:
 ${fileSamples}
