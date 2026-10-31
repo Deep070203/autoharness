@@ -231,67 +231,18 @@ export class PipelineEngine extends EventEmitter {
                     this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
                     this.emitPipelineEvent("stage:complete", "SCOUT", { candidate });
                 } else {
-                    // Fallback to open issues if hunter didn't prove a latent bug
-                    this.emitPipelineEvent("stage:log", "HUNTER", `No verifiable bug in the audited code. The notes above say why each probe was discarded. Looking at open GitHub issues next.`);
-                    const openIssues = await this.github.getOpenBugIssues(targetOwner, targetRepo, 10);
-                    if (openIssues.length === 0) {
-                        throw new Error(`Hunter found no latent bugs and repository has no open bug reports.`);
-                    }
-
-                    this.emitPipelineEvent("stage:complete", "SCOUT", { fallback: true, openIssues: openIssues.length });
-
-                    // Review several bug reports. One DROP used to abort the whole run.
-                    this.emitPipelineEvent("stage:start", "INTERVIEW", { candidates: openIssues.length });
-                    const contributingMd = await this.github.getContributingGuidelines(targetOwner, targetRepo);
-                    const maxReviews = Math.min(openIssues.length, 5);
-                    let lastDrop = "";
-                    candidate = null;
-                    for (let i = 0; i < maxReviews; i++) {
-                        const issue = openIssues[i];
-                        const next = {
-                            number: issue.number,
-                            pull_number: issue.number,
-                            title: issue.title,
-                            body: issue.body || "",
-                            url: issue.html_url,
-                            author: issue.user?.login || "unknown",
-                            labels: issue.labels?.map((l: any) => typeof l === "string" ? l : l.name) || [],
-                            sourceType: "issue"
-                        };
-                        this.emitPipelineEvent("stage:log", "INTERVIEW", `Reviewing issue #${next.number}: ${next.title}`);
-                        const verdict = await runOuroborosInterview(next, contributingMd, this.github, targetOwner, targetRepo);
-                        if (verdict.modelError) {
-                            throw new Error(`Viability interview failed: ${verdict.reason}`);
-                        }
-                        if (verdict.keep) {
-                            candidate = next;
-                            this.emitPipelineEvent("stage:log", "INTERVIEW", `Keeping #${next.number}. ${verdict.reason}`);
-                            this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: true, issue: next.number, reason: verdict.reason });
-                            break;
-                        }
-                        lastDrop = `#${next.number}: ${verdict.reason}`;
-                        this.emitPipelineEvent("stage:log", "INTERVIEW", `Dropped #${next.number}. ${verdict.reason}`);
-                    }
-                    if (!candidate) {
-                        this.emitPipelineEvent("stage:complete", "INTERVIEW", { viable: false, reason: lastDrop });
-                        throw new Error(`No open issue survived the viability filter after ${maxReviews} review(s). Last drop ${lastDrop}`);
-                    }
-
-                    this.emitPipelineEvent("stage:start", "ANALYSIS", { repo: options.repo });
-                    reproResult = await analyzeIssueLocally(candidate, this.github, targetOwner, targetRepo);
-                    this.emitPipelineEvent("stage:complete", "ANALYSIS", { analysis: reproResult.analysis });
-
-                    this.emitPipelineEvent("stage:start", "REPRODUCE", { repoPath: reproResult.repoPath });
-                    reproProof = await attemptReproductionProof(candidate, reproResult.repoPath);
-                    if (reproProof) {
-                        this.emitPipelineEvent("proof:established", "REPRODUCE", reproProof);
-                    }
-                    this.emitPipelineEvent("stage:complete", "REPRODUCE", { proved: Boolean(reproProof) });
+                    this.emitPipelineEvent("stage:log", "HUNTER", "No proven bug. A fix needs a test that fails on the current code, inside the package that was audited. Open issues were not used.");
+                    this.emitPipelineEvent("stage:complete", "HUNTER", { viable: false });
+                    throw new Error("No proven bug. Open issues were not used.");
                 }
             }
 
             if (!reproResult) {
                 throw new Error("Failed to initialize repository workspace.");
+            }
+
+            if (!reproProof) {
+                throw new Error("No failing test on the current code. Not submitting a patch.");
             }
 
             // ── Stage 7: Agentless Fault Localization ──────────────────────
@@ -378,6 +329,9 @@ export class PipelineEngine extends EventEmitter {
             const verification = await runVerification(reproResult.repoPath, reproProof?.command);
             this.emitPipelineEvent("verification:complete", "VERIFY", verification);
             this.emitPipelineEvent("stage:complete", "VERIFY", verification);
+            if (!verification.reproPassed) {
+                throw new Error(`Not submitting. ${verification.summary}`);
+            }
 
             // ── Stage 11: Issue & PR Drafting ─────────────────────────────
             this.emitPipelineEvent("stage:start", "DRAFTING", { candidate: candidate.title });

@@ -9,6 +9,7 @@ import type { ReproductionResult } from "./reproduce.js";
 import type { TaskBlackboard } from "./blackboard.js";
 import { resolveRepoEnv, normalizeCommandWithVenv } from "../utils/env.js";
 import { assessProbeFailure, commandTimeoutMs } from "../utils/toolchain.js";
+import { changesOnDisk } from "../utils/hunt-scope.js";
 import * as dotenv from "dotenv";
 dotenv.config();
 
@@ -183,8 +184,8 @@ function preserveProbe(
         fs.writeFileSync(abs, original);
         onLog?.(`[CodeFix] Restored ${probeRel}. Changing the reproduction is not a fix.`);
     }
-    const modifiedFiles = result.modifiedFiles.filter((file) => path.normalize(file) !== path.normalize(probeRel));
-    if (result.success && modifiedFiles.length === 0) {
+    const sourceFiles = result.modifiedFiles.filter((file) => path.normalize(file) !== path.normalize(probeRel));
+    if (result.success && sourceFiles.length === 0) {
         onLog?.(`[CodeFix] Rejected a change that only edited the probe.`);
         return {
             ...result,
@@ -193,6 +194,9 @@ function preserveProbe(
             summary: "The only edit was the reproduction probe. That does not fix the library.",
         };
     }
+    // The probe is the regression test. Keep it in the commit once the
+    // source fix is real, and only after any edit to the probe was reverted.
+    const modifiedFiles = fs.existsSync(abs) ? [...sourceFiles, probeRel] : sourceFiles;
     return { ...result, modifiedFiles };
 }
 
@@ -372,18 +376,7 @@ Apply the patch using patch_file immediately and verify with run_shell.`;
         const confidenceMatch = out.match(/CONFIDENCE:\s*(LOW|MEDIUM|HIGH)/i);
         const testMatch = out.match(/TEST_RESULT:\s*(PASS|FAIL|NO_TESTS|SKIPPED)/i);
 
-        // Sync git status modified files
-        try {
-            const gitOut = execSync("git status --porcelain", { cwd: reproResult.repoPath, encoding: "utf-8" });
-            for (const line of gitOut.split("\n")) {
-                const match = line.trim().match(/^([MADRC? ]+)\s+(.+)$/);
-                if (match && match[2].trim() !== ".agy_prompt.txt") {
-                    modifiedFilesSet.add(match[2].trim());
-                }
-            }
-        } catch (e) { }
-
-        const modifiedFiles = Array.from(modifiedFilesSet);
+        const modifiedFiles = changesOnDisk(reproResult.repoPath, modifiedFilesSet);
         const summary = summaryMatch?.[1]?.trim() || out.substring(0, 300) || "Code fix applied.";
         const confidence = confidenceMatch?.[1] || 'HIGH';
         const testOutput = testMatch?.[1] || 'PASS';

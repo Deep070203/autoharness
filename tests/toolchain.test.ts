@@ -16,6 +16,7 @@ import {
     isPythonSetupFailure,
     rustPackage,
 } from "../src/utils/toolchain.ts";
+import { changesOnDisk, selectHuntScope } from "../src/utils/hunt-scope.ts";
 
 function write(file: string, contents: string) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -107,23 +108,23 @@ test("typescript probe throws on the bug and a bad import is environmental", () 
         "export function double(n: number): number { return add(n, n) }",
         "",
     ].join("\n"));
-    write(path.join(root, "tests/test_hunted_probe.ts"), [
-        'import { double } from "../src/math"',
+    write(path.join(root, "src/hunted_probe.test.ts"), [
+        'import { double } from "./math"',
         "double(null as unknown as number)",
         "",
     ].join("\n"));
 
     const command = buildProbeCommand("typescript", root, "src/math.ts");
-    assert.ok(command?.includes("tests/test_hunted_probe.ts"));
+    assert.ok(command?.includes("src/hunted_probe.test.ts"));
     const failed = run(command!, root);
     assert.equal(failed.ok, false);
     assert.match(failed.output, /TypeError/);
-    assert.equal(isEnvironmentalProbeFailure("typescript", failed.output, "tests/test_hunted_probe.ts"), false);
+    assert.equal(isEnvironmentalProbeFailure("typescript", failed.output, "src/hunted_probe.test.ts"), false);
 
-    write(path.join(root, "tests/test_hunted_probe.ts"), 'import { missing } from "../src/nope"\nconsole.log(missing)\n');
+    write(path.join(root, "src/hunted_probe.test.ts"), 'import { missing } from "./nope"\nconsole.log(missing)\n');
     const missing = run(command!, root);
     assert.equal(missing.ok, false);
-    assert.equal(isEnvironmentalProbeFailure("typescript", missing.output, "tests/test_hunted_probe.ts"), true);
+    assert.equal(isEnvironmentalProbeFailure("typescript", missing.output, "src/hunted_probe.test.ts"), true);
 });
 
 test("go probe panic is a bug and a missing name is environmental", () => {
@@ -306,6 +307,84 @@ test("a local crash is rejected when it is a different exception than the hypoth
     assert.equal(verdict.accept, false);
     assert.match(verdict.reason, /AttributeError/);
     assert.match(verdict.reason, /IndexError/);
+});
+
+test("a wrong result asserted against the library is a bug", () => {
+    const trace = [
+        "AssertionError: assert [] == [{'n': 1}]",
+        "E       assert [] == [{'n': 1}]",
+    ].join("\n");
+    const probe = [
+        "from realtime._async.client import AsyncRealtimeClient",
+        "socket = AsyncRealtimeClient()",
+        "first = socket.channel('room')",
+        "socket.channel('room')",
+        "assert received == [{'n': 1}]",
+        "",
+    ].join("\n");
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: probe,
+        targetFile: "src/realtime/_async/client.py",
+        claimedText: "TypeError when channel() is called twice",
+    });
+    assert.equal(verdict.accept, true);
+});
+
+test("a constant assertion is not a bug", () => {
+    const verdict = assessProbeFailure({
+        trace: "AssertionError: assert 1 == 2",
+        probeSource: "assert 1 == 2\n",
+        targetFile: "src/client.py",
+    });
+    assert.equal(verdict.accept, false);
+    assert.match(verdict.reason, /does not call the library/);
+});
+
+test("a monorepo hunt stays inside the package recent commits changed", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-scope-"));
+    execSync("git init -q", { cwd: root });
+    execSync("git config user.email t@example.com", { cwd: root });
+    execSync("git config user.name t", { cwd: root });
+    write(path.join(root, "package.json"), '{ "private": true }\n');
+    write(path.join(root, "packages/react/package.json"), '{ "name": "@example/react" }\n');
+    write(path.join(root, "packages/react/src/Feature.tsx"), "export const Feature = () => null\n");
+    write(path.join(root, "packages/node/package.json"), '{ "name": "@example/node" }\n');
+    write(path.join(root, "packages/node/src/index.ts"), "export const n = 1\n");
+    write(path.join(root, "apps/studio/package.json"), '{ "name": "studio" }\n');
+    write(path.join(root, "apps/studio/lib/page.ts"), "export const page = 1\n");
+    execSync("git add -A && git commit -q -m init", { cwd: root });
+
+    const scoped = selectHuntScope(root, ["apps/studio/lib/page.ts"]);
+    assert.equal(scoped.root, "apps/studio");
+    assert.ok(scoped.files.some((file) => file.endsWith("apps/studio/lib/page.ts")));
+    assert.equal(scoped.files.some((file) => file.includes("packages/react")), false);
+    assert.match(scoped.reason, /Monorepo|Auditing apps\/studio/);
+
+    const small = fs.mkdtempSync(path.join(os.tmpdir(), "ah-scope-small-"));
+    execSync("git init -q", { cwd: small });
+    execSync("git config user.email t@example.com", { cwd: small });
+    execSync("git config user.name t", { cwd: small });
+    write(path.join(small, "package.json"), '{ "name": "storage" }\n');
+    write(path.join(small, "src/render.ts"), "export const render = 1\n");
+    execSync("git add -A && git commit -q -m init", { cwd: small });
+    const whole = selectHuntScope(small, ["src/render.ts"]);
+    assert.equal(whole.root, ".");
+    assert.ok(whole.files.includes("src/render.ts"));
+});
+
+test("a deleted scratch file is not part of the commit", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-commit-"));
+    execSync("git init -q", { cwd: root });
+    execSync("git config user.email t@example.com", { cwd: root });
+    execSync("git config user.name t", { cwd: root });
+    write(path.join(root, "src/mutation.ts"), "export const n = 1\n");
+    execSync("git add -A && git commit -q -m init", { cwd: root });
+    write(path.join(root, "src/mutation.ts"), "export const n = 2\n");
+    write(path.join(root, "temp_test_org_update.ts"), "throw new Error('scratch')\n");
+    fs.unlinkSync(path.join(root, "temp_test_org_update.ts"));
+    const files = changesOnDisk(root, ["src/mutation.ts", "temp_test_org_update.ts"]);
+    assert.deepEqual(files, ["src/mutation.ts"]);
 });
 
 test("a panic inside the target file is a bug", () => {

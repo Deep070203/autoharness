@@ -1,5 +1,6 @@
 import { GitHubService } from "../utils/github.js";
 import simpleGit from "simple-git";
+import * as fs from "fs";
 import * as path from "path";
 
 export interface SubmissionResult {
@@ -82,8 +83,18 @@ export async function submitPullRequest(
             return null;
         }
 
-        console.log(`[Submit] Staging ${modifiedFiles.length} modified files...`);
-        for (const file of modifiedFiles) {
+        const present = modifiedFiles.filter((file) => fs.existsSync(path.join(repoPath, file)));
+        const missing = modifiedFiles.filter((file) => !present.includes(file));
+        for (const file of missing) {
+            console.warn(`[Submit] Skipping ${file}. It is no longer on disk.`);
+        }
+        if (present.length === 0) {
+            console.error(`[Submit] No files to commit. Cannot create a PR with zero changes.`);
+            return null;
+        }
+
+        console.log(`[Submit] Staging ${present.length} modified files...`);
+        for (const file of present) {
             console.log(`  + ${file}`);
             await git.add(file);
         }
