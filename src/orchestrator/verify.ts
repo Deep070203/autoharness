@@ -27,10 +27,10 @@ export async function runVerification(
     console.log(`\n🛡️ [Verifier Agent] Verifying fix in ${repoPath}...`);
 
     const repoEnv = resolveRepoEnv(repoPath);
-    let reproPassed = true;
-    let reproOutput = "";
+    let reproPassed = false;
+    let reproOutput = "No reproduction command. The patch needs a test that failed on the current code.";
 
-    // 1. Check reproduction proof
+    // 1. The same test that failed before the patch must now pass.
     if (reproCommand) {
         let cmd = normalizeCommandWithVenv(reproCommand, repoEnv.pythonBin);
         console.log(`[Verifier] Running reproduction command: ${cmd}`);
