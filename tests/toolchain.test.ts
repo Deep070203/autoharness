@@ -396,3 +396,124 @@ test("a panic inside the target file is a bug", () => {
     assert.equal(verdict.accept, true);
     assert.equal(verdict.exceptionType, "panic");
 });
+
+test("goModule and goProbeCommand handle nested Go modules with -C", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-go-mod-"));
+    write(path.join(root, "cli/beacon/go.mod"), "module github.com/test/beacon\n\ngo 1.22\n");
+    write(path.join(root, "cli/beacon/internal/learning/candidate.go"), "package learning\n");
+
+    const cmd = buildProbeCommand("go", root, "cli/beacon/internal/learning/candidate.go");
+    assert.ok(cmd?.includes("-C cli/beacon"));
+    assert.ok(cmd?.includes("./internal/learning"));
+    assert.ok(cmd?.includes("-run '^TestHuntedProbe$'"));
+});
+
+test("detectSourceHeuristics flags floating point, traversal, slicing, and nil map patterns across all languages", async () => {
+    const { detectSourceHeuristics } = await import("../src/utils/toolchain.ts");
+
+    // Go tests
+    const goFp = "func PromotionDecision(eval float64) bool { if eval < 0.5 { return false } return true }";
+    assert.ok(detectSourceHeuristics(goFp, "go").some((a) => a.includes("Arithmetic/IEEE-754")));
+
+    const goPath = "func CleanPart(val string) string { return strings.Trim(val, \"/\") }";
+    assert.ok(detectSourceHeuristics(goPath, "go").some((a) => a.includes("Path/Sanitization")));
+
+    const goSlice = "func clipLine(line string, max int) string { runes := []rune(line); return string(runes[:max-1]) }";
+    assert.ok(detectSourceHeuristics(goSlice, "go").some((a) => a.includes("Slice/Index Math")));
+
+    // TypeScript tests
+    const tsFp = "export function calcScore(raw: number): number { if (Number.isNaN(raw) || raw < 0.6) return 0; return raw; }";
+    assert.ok(detectSourceHeuristics(tsFp, "typescript").some((a) => a.includes("Arithmetic/IEEE-754")));
+
+    const tsPath = "export function sanitizeKey(key: string): string { return path.join('/base', key.replace(/\\.\\./g, '')); }";
+    assert.ok(detectSourceHeuristics(tsPath, "typescript").some((a) => a.includes("Path/Sanitization")));
+
+    const tsSlice = "export function truncate(text: string, max: number): string { return text.slice(0, max - 1) + '...'; }";
+    assert.ok(detectSourceHeuristics(tsSlice, "typescript").some((a) => a.includes("Slice/Index Bounds")));
+
+    const tsNullish = "export function getOptions(opts?: Options) { return opts?.timeout ?? opts?.fallback || 1000; }";
+    assert.ok(detectSourceHeuristics(tsNullish, "typescript").some((a) => a.includes("Nullish & Fallback Inversion")));
+
+    // Python tests
+    const pyFp = "def evaluate_threshold(score: float) -> bool:\n    if math.isnan(score) or score < 0.5:\n        return False\n    return True";
+    assert.ok(detectSourceHeuristics(pyFp, "python").some((a) => a.includes("Arithmetic/IEEE-754")));
+
+    const pyPath = "def get_safe_path(rel_path: str) -> str:\n    return os.path.normpath(os.path.join('/root', rel_path))";
+    assert.ok(detectSourceHeuristics(pyPath, "python").some((a) => a.includes("Path/Sanitization")));
+
+    const pySlice = "def trim_lines(lines: list[str], max_len: int) -> list[str]:\n    return lines[:max_len-1]";
+    assert.ok(detectSourceHeuristics(pySlice, "python").some((a) => a.includes("Slice/Index Math")));
+
+    const pyDefaults = "def append_to(item, target=[]):\n    target.append(item)\n    return target";
+    assert.ok(detectSourceHeuristics(pyDefaults, "python").some((a) => a.includes("Mutable Defaults & Truthiness")));
+
+    // Rust tests
+    const rsFp = "pub fn is_promoted(score: f64) -> bool { if score.is_nan() || score < 0.5 { false } else { true } }";
+    assert.ok(detectSourceHeuristics(rsFp, "rust").some((a) => a.includes("Arithmetic/IEEE-754")));
+
+    const rsPath = "pub fn build_key(base: &Path, rel: &str) -> PathBuf { base.join(rel) }";
+    assert.ok(detectSourceHeuristics(rsPath, "rust").some((a) => a.includes("Path/Sanitization")));
+
+    const rsSlice = "pub fn head(items: &[i32], max: usize) -> &[i32] { &items[..max-1] }";
+    assert.ok(detectSourceHeuristics(rsSlice, "rust").some((a) => a.includes("Slice/Index Math")));
+
+    const rsUnwrap = "pub fn parse_config(raw: Option<&str>) -> &str { raw.unwrap() }";
+    assert.ok(detectSourceHeuristics(rsUnwrap, "rust").some((a) => a.includes("Unchecked Unwrap")));
+});
+
+test("assessProbeFailure accepts Node.js AssertionError with [ERR_ASSERTION] as a behavior failure", () => {
+    const trace = [
+        "node:internal/assert/assertion_error:527",
+        "    throw new AssertionError(err);",
+        "    ^",
+        "AssertionError [ERR_ASSERTION]: BUG: NaN score promoted",
+        "    at file:///workspace/src/hunted_probe.test.ts:10:8",
+    ].join("\n");
+
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "import { calcScore } from './calc'; import assert from 'node:assert/strict'; assert.strictEqual(calcScore(NaN), 0);\n",
+        targetFile: "src/calc.ts",
+    });
+
+    assert.equal(verdict.accept, true);
+    assert.equal(verdict.exceptionType, "AssertionError");
+    assert.ok(verdict.reason.includes("BUG: NaN score promoted"));
+});
+
+test("assessProbeFailure accepts Rust panic and assertion failure", () => {
+    const trace = [
+        "---- hunted_probe stdout ----",
+        "thread 'hunted_probe' panicked at 'assertion failed: `(left == right)`', tests/hunted_probe.rs:12:5",
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+    ].join("\n");
+
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "use my_crate::calc; #[test] fn hunted_probe() { assert_eq!(calc(f64::NAN), 0.0); }\n",
+        targetFile: "src/lib.rs",
+    });
+
+    assert.equal(verdict.accept, true);
+    assert.equal(verdict.exceptionType, "panic");
+    assert.ok(verdict.reason.includes("assertion failed"));
+});
+
+test("assessProbeFailure accepts Go test assertion failure (--- FAIL:) as a behavior failure", () => {
+    const trace = [
+        "=== RUN   TestHuntedProbe",
+        "    candidate_probe_test.go:14: BUG: Evaluation with NaN score was promoted! reason: \"\"",
+        "--- FAIL: TestHuntedProbe (0.00s)",
+        "FAIL",
+    ].join("\n");
+
+    const verdict = assessProbeFailure({
+        trace,
+        probeSource: "package learning\nimport \"testing\"\nfunc TestHuntedProbe(t *testing.T) { PromotionDecision(NaN) }\n",
+        targetFile: "cli/beacon/internal/learning/candidate.go",
+    });
+
+    assert.equal(verdict.accept, true);
+    assert.equal(verdict.exceptionType, "TestFailure");
+    assert.ok(verdict.reason.includes("BUG: Evaluation with NaN score was promoted!"));
+});

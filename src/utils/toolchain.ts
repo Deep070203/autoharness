@@ -216,7 +216,38 @@ export function goProbeFile(targetFile: string): string | undefined {
     return dir === "." ? "hunted_probe_test.go" : `${dir}/hunted_probe_test.go`;
 }
 
-export function goProbeCommand(targetFile: string): string | undefined {
+export function goModule(repoPath: string, targetFile: string): { dir: string; relPkg: string } | undefined {
+    const normalized = safeRelative(targetFile);
+    if (!normalized) return undefined;
+    let dir = path.resolve(repoPath, path.posix.dirname(normalized));
+    const root = path.resolve(repoPath);
+    while (dir === root || dir.startsWith(root + path.sep)) {
+        const manifest = path.join(dir, "go.mod");
+        if (fs.existsSync(manifest)) {
+            const relDir = path.relative(root, dir).split(path.sep).join("/") || ".";
+            const targetDir = path.resolve(repoPath, path.posix.dirname(normalized));
+            const relPkg = path.relative(dir, targetDir).split(path.sep).join("/") || ".";
+            return {
+                dir: relDir,
+                relPkg: relPkg === "." ? "." : `./${relPkg}`,
+            };
+        }
+        if (dir === root) break;
+        dir = path.dirname(dir);
+    }
+    return undefined;
+}
+
+export function goProbeCommand(repoPathOrTarget: string, maybeTargetFile?: string): string | undefined {
+    const repoPath = maybeTargetFile ? repoPathOrTarget : ".";
+    const targetFile = maybeTargetFile || repoPathOrTarget;
+    const mod = goModule(repoPath, targetFile);
+    if (mod) {
+        if (mod.dir === ".") {
+            return `go test -count=1 -timeout 60s -run '^TestHuntedProbe$' ${mod.relPkg}`;
+        }
+        return `go test -C ${shellQuote(mod.dir)} -count=1 -timeout 60s -run '^TestHuntedProbe$' ${mod.relPkg}`;
+    }
     const normalized = safeRelative(targetFile);
     if (!normalized) return undefined;
     const dir = path.posix.dirname(normalized);
@@ -271,22 +302,151 @@ function cargoPackageName(manifestPath: string): string | undefined {
     return body.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
 }
 
+/**
+ * Automatically prepares repo workspaces before running toolchain checks or probes.
+ * Handles common pre-build steps: Make targets (ensure-placeholder, generate, etc.).
+ */
+export function prepareToolchainWorkspace(repoPath: string, log?: (msg: string) => void): void {
+    try {
+        const findOut = execSync('find . -maxdepth 3 -name "Makefile" 2>/dev/null', {
+            cwd: repoPath,
+            encoding: "utf-8",
+            timeout: 10_000,
+        });
+        const makefiles = findOut.split("\n").map((s) => s.trim().replace(/^\.\//, "")).filter(Boolean);
+
+        for (const mf of makefiles) {
+            const mfPath = path.join(repoPath, mf);
+            if (!fs.existsSync(mfPath)) continue;
+            const content = fs.readFileSync(mfPath, "utf-8");
+            const mfDir = path.dirname(mf);
+            if (/ensure-placeholder:/.test(content)) {
+                log?.(`Running \`make ensure-placeholder\` in ${mfDir}...`);
+                try {
+                    execSync("make ensure-placeholder", {
+                        cwd: path.join(repoPath, mfDir),
+                        encoding: "utf-8",
+                        timeout: 30_000,
+                        stdio: ["ignore", "pipe", "pipe"],
+                    });
+                } catch {}
+            }
+        }
+    } catch {}
+}
+
+/**
+ * Static heuristics to guide the LLM towards high-yield boundary and logic flaws across TypeScript, Python, Go, and Rust.
+ */
+export function detectSourceHeuristics(source: string, language: ProjectLanguage): string[] {
+    const alerts: string[] = [];
+
+    if (language === "go") {
+        // Go: Floating-point IEEE-754
+        if (/float64|float32|\bfloat\b|\bmath\.(?:NaN|Inf|IsNaN|IsInf|Abs|Floor|Ceil)|CandidateScoreThreshold|Threshold|Score|Probability|Ratio|division by zero|\/\s*(?:[A-Za-z_]\w*)/.test(source)) {
+            alerts.push("Arithmetic/IEEE-754: File performs floating-point/numeric comparisons. Check for IEEE-754 NaN/Inf comparison bypasses (e.g. NaN < threshold evaluates to false, skipping rejections), division-by-zero, or float64 boundary failures.");
+        }
+        // Go: Sanitization / Path traversal
+        if (/path\.|filepath\.|CleanPart|Clean|Sanitize|Trim|Strip|Prefix|ReplaceAll|strings\.Trim|strings\.Replace|\bJoin\b|\.join\(|\.\.\/|\/\.\./.test(source)) {
+            alerts.push("Path/Sanitization: File manipulates paths, keys, or sanitized strings. Audit docstring contracts vs implementation. Check for directory traversal (../, ..\\), empty segments, and prefix escape.");
+        }
+        // Go: Extremal Slicing / Rune Math
+        if (/\[\s*(?::\s*[^\]]+-1|[^\]]+:\s*[^\]]+|len\([^)]+\)\s*-)/.test(source) || /runes\[|runeCount|clipLine|termLine|Truncat|substring|slice\(/.test(source)) {
+            alerts.push("Slice/Index Math: File performs slicing, rune truncation, or index arithmetic. Check for negative index slicing (e.g. runes[:max-1] when max <= 0), off-by-one bounds, or panic on empty slices.");
+        }
+        // Go: Nil Map / Pointer / Channel
+        if (/map\[|\.Lock\(\)|chan\b|interface\{\}|any\b/.test(source)) {
+            alerts.push("Nil Map/Pointer: File manipulates maps, channels, or pointers. Check for assignment to entry in nil map, close on closed channel, or nil pointer dereference.");
+        }
+    } else if (language === "typescript") {
+        // TypeScript: Number / NaN / IEEE-754
+        if (/parseFloat|Number\(|Number\.NaN|\bNaN\b|Number\.is(?:NaN|Finite)|Infinity|Math\.(?:floor|ceil|round|abs|max|min)|threshold|score|ratio|\/\s*(?:[A-Za-z_]\w*)/i.test(source)) {
+            alerts.push("Arithmetic/IEEE-754: File performs numeric/floating-point operations. Check for NaN propagation (NaN < x, NaN > x, and NaN === NaN are all false), Infinity division, or missing isNaN/isFinite validation.");
+        }
+        // TypeScript: Path / Sanitization / URL Traversal
+        if (/path\.(?:join|resolve|normalize)|decodeURIComponent|clean|sanitize|strip|replace\(|prefix|\.\.\/|\/\.\./i.test(source)) {
+            alerts.push("Path/Sanitization: File joins paths or sanitizes inputs. Audit docstrings/contracts vs implementation: test for directory traversal (../, ..\\), root escapes, or unencoded delimiters.");
+        }
+        // TypeScript: Array / String Slicing & Off-by-one
+        if (/\.slice\(|\.substring\(|\.substr\(|\[\s*[^\]]+-\s*1\s*\]|\.length\s*-|\.split\(/i.test(source)) {
+            alerts.push("Slice/Index Bounds: File performs array/string slicing or index math. Check for negative slice limits (e.g. arr.slice(0, max - 1) with max <= 0 treats negative indices as offset from end), empty string/array indexing, or off-by-one bounds.");
+        }
+        // TypeScript: Nullish / Falsy / Prototype / Type Coercion
+        if (/\?\?|\|\||\?\.|\bdelete\b|JSON\.parse|Object\.assign|__proto__|typeof\b/i.test(source)) {
+            alerts.push("Nullish & Fallback Inversion: File uses logical fallbacks or object property access. Check for falsy inversion (e.g. 0, false, '' overridden by default), unhandled null/undefined dereference (Cannot read properties of undefined), or prototype pollution.");
+        }
+    } else if (language === "python") {
+        // Python: Float / NaN / Division
+        if (/float\(|math\.(?:nan|isnan|isinf|isclose)|round\(|threshold|score|ratio|\/\s*(?:[A-Za-z_]\w*)/i.test(source)) {
+            alerts.push("Arithmetic/IEEE-754: File performs floating-point operations. Check for float('nan') comparison bypasses (nan < x is False), division by zero, or float('inf') overflow breaking serialization (json.dumps raises ValueError on NaN).");
+        }
+        // Python: Path / URL Sanitization
+        if (/os\.path|pathlib|Path\(|urlparse|unquote|normpath|split\(['"/]\)|\.\.\/|\/\.\./i.test(source)) {
+            alerts.push("Path/Sanitization: File manipulates paths or URLs. Audit docstrings/contracts: check for directory traversal (../, ..\\), empty segments, or os.path.join replacing prefix with absolute paths.");
+        }
+        // Python: Slicing & Indexing
+        if (/\[\s*:\s*[^\]]+-1\s*\]|\[\s*-[0-9]+\s*\]|\[\s*0\s*\]|\.pop\(|len\([^)]+\)\s*-/i.test(source)) {
+            alerts.push("Slice/Index Math: File slices collections or accesses indexes. Check for negative slice limits (e.g. items[:max-1] with max <= 0 slices from the end), empty lists raising IndexError, or missing keys raising KeyError.");
+        }
+        // Python: Mutable Default / Truthiness / NoneType
+        if (/def\s+\w+\([^)]*=\s*(?:\[\]|\{\}|set\(\))|if\s+not\s+\w+:|\bNone\b|\.get\(/i.test(source)) {
+            alerts.push("Mutable Defaults & Truthiness: File defines function arguments or checks truthiness. Check for mutable default argument accumulation (def fn(x=[])) or truthiness inversion (if not val: overriding valid 0, False, or '').");
+        }
+    } else if (language === "rust") {
+        // Rust: Float / NaN
+        if (/f32|f64|NAN|INFINITY|is_nan|partial_cmp|threshold|score|\/\s*(?:[A-Za-z_]\w*)/i.test(source)) {
+            alerts.push("Arithmetic/IEEE-754: File performs floating-point math. Check for f64::NAN comparison traps (PartialOrd comparisons return None / false, bypassing validation) or division by zero.");
+        }
+        // Rust: Path traversal & PathBuf
+        if (/Path::|PathBuf::|\.join\(|\.strip_prefix\(|clean|sanitize|\.\.\/|\/\.\./i.test(source)) {
+            alerts.push("Path/Sanitization: File manipulates paths. Note that in Rust, Path::new(base).join('/etc/passwd') replaces base with the absolute path! Test for directory traversal and prefix escape.");
+        }
+        // Rust: Slicing & usize underflow
+        if (/\[\s*\.\.\s*[^\]]+-1\s*\]|\[\s*[^\]]+\.\.\s*\]|\.get\(|\.len\(\)\s*-/i.test(source)) {
+            alerts.push("Slice/Index Math: File performs slice indexing. Slicing with [..max-1] when max <= 0 causes usize subtraction underflow panic or slice bounds panic. Check for empty slice index panics.");
+        }
+        // Rust: Option/Result unwrap panic
+        if (/\.unwrap\(|\.expect\(|panic!|unreachable!/i.test(source)) {
+            alerts.push("Unchecked Unwrap: File calls .unwrap() or .expect(). Check if passing None or unexpected input triggers a panic (e.g. 'called Option::unwrap() on a None value').");
+        }
+    } else {
+        // General fallback
+        if (/float|nan|infinity|threshold|score/i.test(source)) {
+            alerts.push("Arithmetic/IEEE-754: Check for NaN/Inf numeric boundary edge cases or division by zero.");
+        }
+        if (/path|join|sanitize|clean|\.\.\//i.test(source)) {
+            alerts.push("Path/Sanitization: Check for directory traversal (../, ..\\) and prefix escape.");
+        }
+        if (/slice|substring|index|\[.*-1\]/i.test(source)) {
+            alerts.push("Slice/Index Math: Check for negative or out-of-bounds slice indices.");
+        }
+    }
+
+    return alerts;
+}
+
 export function auditNote(language: ProjectLanguage, repoPath: string, relPath: string, source: string): string {
+    let base = "";
     if (language === "go") {
         const probe = goProbeFile(relPath);
         const pkg = goPackageName(source);
-        if (!probe) return "";
-        return ` [Go probe: ${probe}, package ${pkg || "the file's package clause"}, test TestHuntedProbe]`;
-    }
-    if (language === "rust") {
+        if (probe) {
+            base = ` [Go probe: ${probe}, package ${pkg || "the file's package clause"}, test TestHuntedProbe]`;
+        }
+    } else if (language === "rust") {
         const crate = rustPackage(repoPath, relPath);
-        if (!crate) return "";
-        return ` [Rust crate \`${crate.name}\`, probe ${crate.probeFile}, \`use ${crate.name}::...\`]`;
+        if (crate) {
+            base = ` [Rust crate \`${crate.name}\`, probe ${crate.probeFile}, \`use ${crate.name}::...\`]`;
+        }
+    } else if (language === "typescript") {
+        base = ` [TypeScript probe: ${typescriptProbeFile(relPath)}, relative import, no extension]`;
     }
-    if (language === "typescript") {
-        return ` [TypeScript probe: ${typescriptProbeFile(relPath)}, relative import, no extension]`;
+
+    const heuristics = detectSourceHeuristics(source, language);
+    if (heuristics.length > 0) {
+        base += `\n  * Heuristic Alerts:\n    - ${heuristics.join("\n    - ")}`;
     }
-    return "";
+    return base;
 }
 
 export function probeInstructions(language: ProjectLanguage, repoPath: string, batchFiles: string[]): string {
@@ -294,13 +454,13 @@ export function probeInstructions(language: ProjectLanguage, repoPath: string, b
         const hints = batchFiles.map((file) => `- ${file}: probe ${typescriptProbeFile(file)}`).join("\n");
         return `
 TASK:
-The samples are TypeScript. Find a realistic call that throws, or a call that returns the wrong value.
+The samples are TypeScript. Find a realistic call that throws, returns the wrong value, or violates a docstring contract/invariant.
 Write the probe beside the target file (src/lib.ts -> src/hunted_probe.test.ts). It is executed with tsx from the repository root.
 - ESM import/export. Import the target with a relative path and NO file extension, for example import { fn } from "./lib".
-- Call the imported function. An unused import is deleted before the file runs, and the probe then exits 0.
-- A wrong result is a bug even when nothing throws. Assert the correct result. The process must exit non-zero on the current code and 0 once the code is fixed. Do not assert a constant such as true or 1 === 2.
+- Probe realistic edge values: NaN, Infinity, -0, 0, "", null, undefined, traversal strings ("../../etc/passwd", "foo/../bar"), negative slice indices, empty collections.
+- Assertions: import assert from "node:assert/strict"; assert.strictEqual(actual, expected, "BUG: reason") or assert.deepStrictEqual(...).
+- When the bug is an unhandled throw (TypeError, RangeError, unhandled rejection), let it throw without catching. When the bug is a logic or contract bypass, assert the expected result so it fails with an AssertionError on the current code and exits 0 once fixed.
 - Do not use path aliases, vitest, jest, mocha, or a test runner.
-- Do not catch the exception you are trying to prove. An uncaught throw when the bug is a crash. Exit 0 when the behavior is already correct.
 - No network and no watch mode. Keep the probe; it is the regression test.
 Files in this round:
 ${hints}
@@ -319,11 +479,12 @@ probeFileName must be the hunted_probe.test.ts path next to targetFile.
         }).join("\n");
         return `
 TASK:
-The samples are Go. Find a realistic call that panics, or a call that returns the wrong value. Assert the correct result when nothing panics. The test must fail on the current code.
-Write a test in the SAME directory as targetFile, named hunted_probe_test.go.
+The samples are Go. Find a realistic call that panics, returns the wrong value, or violates a docstring contract/invariant.
+Write a unit test in the SAME directory as targetFile, named hunted_probe_test.go.
 - Use the same package clause as the target file, not package foo_test.
-- The test function must be named TestHuntedProbe.
-- Do not recover the panic. t.Fatal or a panic when the bug is present. The test passes when the bug is absent.
+- The test function must be named TestHuntedProbe(t *testing.T).
+- Probe realistic edge values: math.NaN(), math.Inf(1), 0, -1, empty string, path traversal ("../../etc/passwd", "foo/../bar"), nil pointers, empty slices.
+- When the bug is a panic (slice out-of-bounds, nil map write), let it panic naturally. When the bug is a logic or contract bypass, assert the correct behavior with t.Fatalf("..."). The test must FAIL on the current code and pass once the code is fixed.
 - No network. No extra build tags.
 Files in this round:
 ${hints}
@@ -339,10 +500,12 @@ probeFileName must be the hunted_probe_test.go path next to targetFile.
         }).join("\n");
         return `
 TASK:
-The samples are Rust. Find a realistic call that panics or returns the wrong value. Assert the correct result. The test must fail on the current code.
+The samples are Rust. Find a realistic call that panics, returns the wrong value, or violates a contract/invariant. Assert the correct result. The test must fail on the current code.
 Write an integration test at the probe path for the crate that contains targetFile. The test function must be named hunted_probe.
 - Call the public API: use <crate_name>::...
-- Do not catch the panic with catch_unwind. assert! or panic! when the bug is present. The test passes when the bug is absent.
+- Probe realistic edge values: f64::NAN, f64::INFINITY, 0, -1, "", traversal strings ("../../etc/passwd"), empty slices &[], None.
+- When the bug is a panic (slice bounds out of bounds, unwrap on None, subtraction underflow), let it panic naturally. When the bug is a logic or contract bypass, assert with assert_eq!(actual, expected, "BUG: reason") or panic!("BUG: reason").
+- Do not catch the panic with catch_unwind. The test passes when the bug is absent.
 - No network. Do not edit Cargo.toml.
 Files in this round:
 ${hints}
@@ -373,7 +536,7 @@ export function buildProbeCommand(
     targetFile: string
 ): string | undefined {
     if (language === "typescript") return typescriptProbeCommand(targetFile);
-    if (language === "go") return goProbeCommand(targetFile);
+    if (language === "go") return goProbeCommand(repoPath, targetFile);
     if (language === "rust") return rustPackage(repoPath, targetFile)?.command;
     return undefined;
 }
@@ -425,21 +588,31 @@ export function parseTraceException(trace: string): { type?: string; message?: s
     const lines = trace.split("\n").map((line) => line.trim()).filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i--) {
         const line = lines[i];
-        const typed = line.match(/^([A-Za-z_][\w.]*(?:Error|Exception))\s*:\s*(.*)$/);
+        // Matches standard typed exceptions across Python and TypeScript, including Node's [ERR_ASSERTION]
+        const typed = line.match(/^([A-Za-z_][\w.]*(?:Error|Exception))(?:\s*\[[^\]]+\])?\s*:\s*(.*)$/);
         if (typed) return { type: typed[1].split(".").pop(), message: typed[2] };
         if (/^panic:/.test(line) || /panicked at/.test(line)) {
-            return { type: "panic", message: line.replace(/^panic:\s*/, "") };
+            const clean = line.replace(/^(?:thread\s+'[^']+'\s+)?panicked at\s*(?:'(.*)'|"?([^"]+)"?)?,?.*$/, "$1$2");
+            return { type: "panic", message: clean || line.replace(/^panic:\s*/, "") };
         }
+    }
+    // Check for Go test failure: hunted_probe_test.go:XX: <message> or --- FAIL:
+    if (/--- FAIL:/.test(trace)) {
+        const goFailMatch = trace.match(/(?:[a-zA-Z0-9_-]+\.go:\d+:\s*)([^\n]+)/);
+        if (goFailMatch) {
+            return { type: "TestFailure", message: goFailMatch[1].trim() };
+        }
+        return { type: "TestFailure", message: "Go test assertion failed" };
     }
     if (/assertion failed|index out of bounds/.test(trace)) return { type: "panic", message: "panic" };
     return {};
 }
 
 /**
- * Expected versus actual. A bare "AssertionError" or `assert False` does not qualify.
+ * Expected versus actual. Recognizes behavioral assertions across TS, Python, Go, and Rust.
  */
 export function isBehaviorAssertion(trace: string): boolean {
-    return /left:\s*|right:\s*|expected\b|received\b|AssertionError:\s*assert\s+\S+\s*==|assertion (`left| failed)|Assertion with/i.test(trace);
+    return /left:\s*|right:\s*|expected\b|received\b|AssertionError|ERR_ASSERTION|assertion (`left| failed)|Assertion with|--- FAIL:|assert\.|assert\(|FAILED \(failures=\d+\)|assertion failed/i.test(trace);
 }
 
 /** The probe has to call the library. Asserting a constant does not. */
@@ -455,7 +628,16 @@ export function probeTouchesLibrary(probeSource: string, targetFile: string): bo
 
 function traceEntersTarget(trace: string, targetFile: string): boolean {
     const normalized = targetFile.replace(/\\/g, "/");
-    return trace.replace(/\\/g, "/").includes(normalized);
+    const traceNorm = trace.replace(/\\/g, "/");
+    if (traceNorm.includes(normalized)) return true;
+    const parts = normalized.split("/").filter(Boolean);
+    if (parts.length >= 2) {
+        const tail2 = parts.slice(-2).join("/");
+        if (traceNorm.includes(tail2)) return true;
+    }
+    const base = path.posix.basename(normalized);
+    if (base.length > 3 && traceNorm.includes("/" + base)) return true;
+    return false;
 }
 
 const REMOTE_EXCEPTION = /Unauthorized|HTTPStatus|ConnectError|ConnectTimeout|ReadTimeout|PoolTimeout|NetworkError|ConnectionError|ConnectionRefusedError|URLError|SSLError|ProxyError/;
@@ -509,7 +691,7 @@ export function assessProbeFailure(input: {
     // A wrong result often fails in the test, not inside the library.
     // storage's signed-url test, supabase-py's channel test, etl's OID
     // assertion, and PostHogFeature's fallback test all work this way.
-    if (assertion && (type === "AssertionError" || !traceEntersTarget(input.trace, input.targetFile))) {
+    if (assertion && (type === "AssertionError" || type === "TestFailure" || !traceEntersTarget(input.trace, input.targetFile))) {
         if (!probeTouchesLibrary(input.probeSource, input.targetFile)) {
             return {
                 accept: false,
@@ -532,7 +714,7 @@ export function assessProbeFailure(input: {
         return { accept: false, reason: `the traceback never entered ${input.targetFile}` };
     }
 
-    if (input.claimedText && type !== "panic" && type !== "AssertionError") {
+    if (input.claimedText && type !== "panic" && type !== "AssertionError" && type !== "TestFailure") {
         const claimed = claimedExceptionTypes(input.claimedText);
         if (claimed.length > 0 && !claimed.includes(type)) {
             return {

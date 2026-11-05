@@ -14,6 +14,7 @@ import {
     assessProbeFailure,
     isEnvironmentalProbeFailure,
     isJsonResponseError,
+    prepareToolchainWorkspace,
     probeBuildsFake,
     probeInstructions,
     resolveProbeFile,
@@ -196,6 +197,7 @@ export class BugHunterAgent {
         log: (msg: string) => void
     ): { passed: boolean; runner?: string; output: string } {
         const repoEnv = resolveRepoEnv(this.repoPath);
+        prepareToolchainWorkspace(this.repoPath, log);
         log(`Detected ${profile.suiteLabel}. Verifying the toolchain instead of the full suite.`);
         if (profile.language === "typescript" && !fs.existsSync(path.join(this.repoPath, "node_modules"))) {
             log("node_modules is missing. Probes can still import this repo's source, but third-party imports will fail until dependencies are installed.");
@@ -340,8 +342,12 @@ export class BugHunterAgent {
             return null;
         }
 
-        // Rank files: Recently churned files FIRST, followed by utility/parsing/config files
-        const highYieldKeywords = ["util", "helper", "color", "split", "format", "config", "parse", "clean", "type", "rule", "model", "match", "transform", "sanitize"];
+        // Rank files: Recently churned files FIRST, followed by high-yield boundary/parsing/sanitizing targets
+        const highYieldKeywords = [
+            "util", "helper", "color", "split", "format", "config", "parse", "clean", "type", "rule",
+            "model", "match", "transform", "sanitize", "eval", "score", "promot", "candidate", "clip",
+            "term", "key", "path", "validat", "redact", "calc", "bound", "limit"
+        ];
         const churnSet = new Set(grounding.churnedFiles);
 
         allSourceFiles.sort((a, b) => {
@@ -388,7 +394,7 @@ export class BugHunterAgent {
 OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
 {
   "title": "Conventional Commit title",
-  "archetype": "Type & Nil Panics | Empty Collection Indexing | Boolean Fallback Inversion | In-Place Mutation",
+  "archetype": "IEEE-754 Boundary Inversion | Sanitization & Contract Inversion | Extremal Slice Math | Type & Nil Panics | Boolean Fallback Inversion | In-Place Mutation",
   "targetFile": "relative/path/to/the file under test",
   "explanation": "Concrete explanation of the root cause and the minimal fix",
   "probeCode": "source of the probe",
@@ -397,15 +403,16 @@ OUTPUT FORMAT (exact JSON only, no markdown wrapping, no extra text):
             const taskSection = focusedLanguage
                 ? `${probeInstructions(language, this.repoPath, batchFiles)}\n${outputFormat}`
                 : `TASK:
-Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, or unexpected types) that crashes with an unhandled exception.
+Audit the provided code. Look for a realistic function call with plausible inputs (e.g. passing None, missing optional parameters, empty collections, unexpected types, float('nan'), or traversal strings) that crashes with an unhandled exception or returns an invalid result violating a contract/invariant.
 Write a standalone script in the same language. It is executed directly (python -P <file> for Python) from the repository root and must finish in under 5 seconds.
-A wrong return value is a bug. Assert the correct result so the script fails on the current code and passes once the code is fixed. Do not assert a constant.
+A wrong return value is a bug. Assert the correct result with \`assert actual == expected, "BUG: reason"\` so the script fails on the current code and passes once the code is fixed. Do not assert a constant.
 - Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
+- Probe realistic edge values: float('nan'), float('inf'), 0, -1, "", None, traversal strings ("../../etc/passwd", "foo/../bar"), empty lists [], empty dicts {}.
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
 - Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls. A 401, 403, connection error, or any traceback that shows an HTTP request is not a bug.
 - Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
 - Do NOT define a class, mock, fake, stub, or patch. Call the public function with None, "", [], 0, or an object the library itself constructs. A traceback that names a type you defined is your probe, and it will be discarded.
-- When the bug is a crash, the traceback must be raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, or ValueError). When the bug is a wrong result, assert the correct value so the current code fails. When the behavior is already correct, exit 0.
+- When the bug is a crash, the traceback must be raised inside the target file (ValidationError, AttributeError, TypeError, KeyError, IndexError, ValueError, ZeroDivisionError). When the bug is a wrong result or contract bypass, assert the correct value so the current code fails. When the behavior is already correct, exit 0.
 ${outputFormat}`;
 
             const hypothesisPrompt = `
@@ -413,14 +420,49 @@ You are an expert security researcher and software engineer finding latent bugs 
 
 A bug is a wrong result or a crash inside the library on a value a real caller can pass. A wrong result still returns: the probe asserts the correct value and fails on the current code. If the only way to make it crash is to pass an object you defined, there is no bug. Say what the code actually does.
 
-### 7 High-Yield Bug Archetypes:
-1. Type & Nil Panics: Passing valid/common edge-case types (None/null, empty strings, numbers, dicts, instances) to functions that fail to validate input and raise unhandled AttributeError or TypeError.
-2. In-Place State Mutation: Modifying incoming arguments, options dictionaries, or lists in-place instead of making a copy.
-3. Boolean / Fallback Inversion: \`if not val:\` or \`if val:\` where \`val === 0\` or \`val is False\` or \`""\` is valid input but gets incorrectly overridden.
-4. Empty Collection / Missing Key Indexing: Accessing \`arr[0]\` or \`dict[key]\` without boundary or existence check, causing IndexError or KeyError.
-5. Path & Delimiter Splitting: String splits on colons or slashes that drop components or fail on empty segments.
-6. Type Coercion / Enum Fallback: Converting input to enum or string where passing None or unexpected values triggers ValueError/KeyError instead of default.
-7. Unchecked Return Values: Functions returning None on failure which callers immediately dereference.
+### High-Yield Bug Archetypes & Failure Modes (TS, Python, Go, Rust):
+1. IEEE-754 & Arithmetic Boundary Inversion:
+   - Floating-point NaN, ±Inf, -0.0, and division-by-zero across languages:
+     * Python: float('nan') < 0.5 is False, math.isnan missing. json.dumps(float('nan')) raises ValueError.
+     * TypeScript: NaN < x and NaN === NaN are false. isFinite(Infinity) is false.
+     * Go: math.NaN() < threshold is false, skipping validation. json.Marshal on NaN fails.
+     * Rust: f64::NAN < threshold is false. PartialOrd traps.
+   - Inversion trap: \`if val < min { reject() }\` assumes non-rejection implies \`val >= min\`. With NaN, corrupt/failed calculations bypass validation!
+
+2. Sanitization, Path & Contract Inversion:
+   - Functions with docstrings/contracts promising: "rejects traversal", "safe single key segment", "prevents climbing out of prefix", "normalizes path".
+   - Flawed implementations across languages:
+     * Python: os.path.join("/base", "/etc/passwd") replaces prefix with absolute path; normpath climbing with \`../../\`.
+     * TypeScript: path.join or custom regex missing internal \`../\` or \`..\\\`.
+     * Go: CleanPart or strings.Trim only checking exact equality \`== "." || == ".."\`, permitting internal \`../../etc/passwd\`.
+     * Rust: Path::new(base).join("/etc/passwd") overrides base prefix.
+   - The probe asserts that the returned value satisfies the contract (e.g. assert, assert.strictEqual, or t.Fatalf fails on dangerous input).
+
+3. Extremal Slice Bounds & Truncation Math:
+   - Slicing logic like \`[:max-1]\`, \`slice[offset:offset+len]\`, substring clipping across languages:
+     * Python: items[:max-1] with max <= 0 slices from the end! items[0] on empty list raises IndexError.
+     * TypeScript: arr.slice(0, max - 1) with max <= 0 offsets from end.
+     * Go: runes[:max-1] with max <= 0 panics with \`slice bounds out of range [:-1]\`.
+     * Rust: &slice[..max-1] with max <= 0 causes usize subtraction overflow panic or slice bounds panic.
+   - Off-by-one errors when max == 1 appending an ellipsis "…", or rune vs byte discrepancies in multi-byte UTF-8 strings.
+
+4. Type & Nil / Null / None Panics & Missing Keys:
+   - Python: AttributeError: 'NoneType' object has no attribute 'x', KeyError on missing dict keys, mutable default arguments (\`def fn(items=[])\`).
+   - TypeScript: TypeError: Cannot read properties of undefined/null, unhandled promise rejections.
+   - Go: panic: assignment to entry in nil map, nil pointer dereference, close on closed channel.
+   - Rust: panicked at 'called Option::unwrap() on a None value'.
+
+5. Boolean / Fallback Inversion:
+   - \`if not val:\` or \`val || defaultVal\` where \`0\`, \`false\`, or \`""\` is valid user input but gets incorrectly overridden with defaults instead of \`??\` or explicit nil checks.
+
+6. In-Place State Mutation:
+   - Modifying caller-supplied options, slices, maps, dicts, or structs in-place instead of making a copy, mutating shared state across goroutines, threads, or async turns.
+
+7. Empty Collection / Missing Key Indexing:
+   - Accessing arr[0], dict[key], or slice[0] without boundary or existence check, causing IndexError, KeyError, or panic.
+
+8. Unchecked Errors & Swallowed Nil Returns:
+   - Functions returning (nil, nil) or swallowing exceptions without initializing return values, causing immediate caller crashes when dereferenced.
 
 ### Recent Commit Context:
 ${recentCommitsSummary || "No recent commits found."}
