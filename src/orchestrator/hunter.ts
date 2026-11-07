@@ -12,6 +12,7 @@ import {
     detectProject,
     huntExtensions,
     assessProbeFailure,
+    assessReachability,
     isEnvironmentalProbeFailure,
     isJsonResponseError,
     prepareToolchainWorkspace,
@@ -407,7 +408,9 @@ Audit the provided code. Look for a realistic function call with plausible input
 Write a standalone script in the same language. It is executed directly (python -P <file> for Python) from the repository root and must finish in under 5 seconds.
 A wrong return value is a bug. Assert the correct result with \`assert actual == expected, "BUG: reason"\` so the script fails on the current code and passes once the code is fixed. Do not assert a constant.
 - Import the public package (from prefect.module import fn). Package roots are already on PYTHONPATH.
-- Probe realistic edge values: float('nan'), float('inf'), 0, -1, "", None, traversal strings ("../../etc/passwd", "foo/../bar"), empty lists [], empty dicts {}.
+- Do not pass float('nan'), float('inf'), or a length <= 0 yourself. json.loads cannot produce NaN or Inf. A failure on a value the probe invents is discarded unless a non-test caller passes it.
+- A slice of max-1 counts only when a non-test caller passes that length. Positive literals at every call site mean there is no bug.
+- For a sanitizer, call the function that joins the result and assert the joined path stays under its prefix.
 - Do NOT modify sys.path. Never put a package interior such as src/<package> on the path — that shadows the stdlib (types, functools, logging) and the probe is discarded as an environment failure.
 - Do NOT use pytest, fixtures, conftest, databases, cloud services, or network calls. A 401, 403, connection error, or any traceback that shows an HTTP request is not a bug.
 - Do NOT catch ImportError or ModuleNotFoundError. A printed message such as "Could not import" or "is installed" is not the bug.
@@ -427,7 +430,8 @@ A bug is a wrong result or a crash inside the library on a value a real caller c
      * TypeScript: NaN < x and NaN === NaN are false. isFinite(Infinity) is false.
      * Go: math.NaN() < threshold is false, skipping validation. json.Marshal on NaN fails.
      * Rust: f64::NAN < threshold is false. PartialOrd traps.
-   - Inversion trap: \`if val < min { reject() }\` assumes non-rejection implies \`val >= min\`. With NaN, corrupt/failed calculations bypass validation!
+   - Inversion trap: \`if val < min { reject() }\` assumes non-rejection implies \`val >= min\`. With NaN, corrupt/failed calculations bypass validation.
+   - Do not file this when the probe assigns the NaN. encoding/json, json.loads, and JSON.parse cannot produce NaN or Inf. File it only when a non-test caller constructs one, or a parser it uses accepts a payload that produces one.
 
 2. Sanitization, Path & Contract Inversion:
    - Functions with docstrings/contracts promising: "rejects traversal", "safe single key segment", "prevents climbing out of prefix", "normalizes path".
@@ -436,7 +440,7 @@ A bug is a wrong result or a crash inside the library on a value a real caller c
      * TypeScript: path.join or custom regex missing internal \`../\` or \`..\\\`.
      * Go: CleanPart or strings.Trim only checking exact equality \`== "." || == ".."\`, permitting internal \`../../etc/passwd\`.
      * Rust: Path::new(base).join("/etc/passwd") overrides base prefix.
-   - The probe asserts that the returned value satisfies the contract (e.g. assert, assert.strictEqual, or t.Fatalf fails on dangerous input).
+   - The probe asserts the joined path, from the caller that joins the sanitized value. The sanitizer returning the input is not, by itself, the bug.
 
 3. Extremal Slice Bounds & Truncation Math:
    - Slicing logic like \`[:max-1]\`, \`slice[offset:offset+len]\`, substring clipping across languages:
@@ -445,6 +449,7 @@ A bug is a wrong result or a crash inside the library on a value a real caller c
      * Go: runes[:max-1] with max <= 0 panics with \`slice bounds out of range [:-1]\`.
      * Rust: &slice[..max-1] with max <= 0 causes usize subtraction overflow panic or slice bounds panic.
    - Off-by-one errors when max == 1 appending an ellipsis "…", or rune vs byte discrepancies in multi-byte UTF-8 strings.
+   - A panic or a wrap on max <= 0 is not a bug when every non-test caller passes a positive literal.
 
 4. Type & Nil / Null / None Panics & Missing Keys:
    - Python: AttributeError: 'NoneType' object has no attribute 'x', KeyError on missing dict keys, mutable default arguments (\`def fn(items=[])\`).
@@ -592,6 +597,23 @@ ${taskSection}
                         break;
                     }
 
+                    const reach = assessReachability({
+                        repoPath: this.repoPath,
+                        language: focusedLanguage ? language : "python",
+                        probeSource: probeCode,
+                        targetFile: String(parsed.targetFile),
+                    });
+                    if (!reach.accept) {
+                        log(`Round ${batchIdx + 1}: Not reachable. ${reach.reason}`);
+                        try { fs.unlinkSync(probeAbsPath); } catch (e) {}
+                        if (attempt === 1 && reach.retry) {
+                            importFeedback = reach.reason;
+                            continue;
+                        }
+                        this.roundNotes.push(`Round ${batchIdx + 1} (${parsed.targetFile}): ${reach.reason}`);
+                        break;
+                    }
+
                     const exceptionType = verdict.exceptionType || "Error";
                     const title = String(parsed.title).includes(exceptionType)
                         ? String(parsed.title)
@@ -602,9 +624,10 @@ ${taskSection}
                         targetFile: parsed.targetFile
                     });
 
+                    const reachNote = reach.note ? `\n\nReachability: ${reach.note}` : "";
                     return {
                         title,
-                        description: `Confirmed crash inside ${parsed.targetFile}: ${verdict.reason}\n\n${parsed.explanation}`,
+                        description: `Confirmed inside ${parsed.targetFile}: ${verdict.reason}\n\n${parsed.explanation}${reachNote}`,
                         archetype: parsed.archetype,
                         targetFile: parsed.targetFile,
                         probeFilePath: probeFileName,

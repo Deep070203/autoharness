@@ -11,6 +11,7 @@ import {
     goProbeFile,
     huntExtensions,
     assessProbeFailure,
+    assessReachability,
     isEnvironmentalProbeFailure,
     isJsonResponseError,
     isPythonSetupFailure,
@@ -497,6 +498,130 @@ test("assessProbeFailure accepts Rust panic and assertion failure", () => {
     assert.equal(verdict.accept, true);
     assert.equal(verdict.exceptionType, "panic");
     assert.ok(verdict.reason.includes("assertion failed"));
+});
+
+test("reachability rejects a NaN the probe assigns when no caller produces one", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-nan-"));
+    write(path.join(root, "candidate.go"), `package learning
+func PromotionDecision(score float64) bool {
+	if score < 0.60 { return false }
+	return true
+}
+`);
+    write(path.join(root, "memory.go"), `package learning
+func run(raw []byte) bool {
+	var score float64
+	return PromotionDecision(score)
+}
+`);
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "candidate.go",
+        probeSource: `package learning
+import "math"
+func TestHuntedProbe(t *testing.T) {
+	if PromotionDecision(math.NaN()) { t.Fatal("promoted") }
+}
+`,
+    });
+    assert.equal(verdict.accept, false);
+    assert.equal(verdict.retry, false);
+});
+
+test("reachability keeps a NaN failure when a caller parses float text", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-parse-"));
+    write(path.join(root, "candidate.go"), "package learning\nfunc PromotionDecision(score float64) bool { return score < 0.6 }\n");
+    write(path.join(root, "memory.go"), `package learning
+import "strconv"
+func run(text string) bool {
+	score, _ := strconv.ParseFloat(text, 64)
+	return PromotionDecision(score)
+}
+`);
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "candidate.go",
+        probeSource: "package learning\nimport \"math\"\nfunc TestHuntedProbe(t *testing.T) { PromotionDecision(math.NaN()) }\n",
+    });
+    assert.equal(verdict.accept, true);
+});
+
+test("reachability rejects a slice panic when every caller passes a positive literal", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-slice-"));
+    write(path.join(root, "client.go"), `package intelapi
+func clipLine(s string, max int) string {
+	runes := []rune(s)
+	return string(runes[:max-1])
+}
+func show(s string) string { return clipLine(s, 40) + clipLine(s, 300) }
+`);
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "client.go",
+        probeSource: "package intelapi\nfunc TestHuntedProbe(t *testing.T) { clipLine(\"hello\", 0) }\n",
+    });
+    assert.equal(verdict.accept, false);
+    assert.equal(verdict.retry, false);
+});
+
+test("reachability keeps a slice panic when a caller passes a variable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-width-"));
+    write(path.join(root, "client.go"), `package intelapi
+func clipLine(s string, max int) string { return s }
+func show(s string, width int) string { return clipLine(s, width) }
+`);
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "client.go",
+        probeSource: "package intelapi\nfunc TestHuntedProbe(t *testing.T) { clipLine(\"hello\", 0) }\n",
+    });
+    assert.equal(verdict.accept, true);
+});
+
+test("reachability asks for the joined key when a sanitizer result is path-joined", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-key-"));
+    write(path.join(root, "objectkey.go"), `package objectkey
+func CleanPart(value string) string { return value }
+`);
+    write(path.join(root, "upload.go"), `package ci
+import "path"
+func key(id string) string { return path.Join("tenant", CleanPart(id)) }
+`);
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "objectkey.go",
+        probeSource: "package objectkey\nfunc TestHuntedProbe(t *testing.T) { CleanPart(\"../../etc/passwd\") }\n",
+    });
+    assert.equal(verdict.accept, false);
+    assert.equal(verdict.retry, true);
+});
+
+test("reachability accepts a traversal probe that asserts the joined key", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ah-reach-join-"));
+    write(path.join(root, "upload.go"), `package ci
+import "path"
+func uploadObjectKey(id string) string { return path.Join("tenant/logs", id) }
+`);
+    write(path.join(root, "session.go"), "package ci\nconst idEnv = \"GITHUB_RUN_ID\"\n");
+    const verdict = assessReachability({
+        repoPath: root,
+        language: "go",
+        targetFile: "upload.go",
+        probeSource: `package ci
+import "path"
+func TestHuntedProbe(t *testing.T) {
+	got := uploadObjectKey("../../../../outside")
+	if got != path.Join("tenant/logs", "outside") { t.Fatalf("left prefix: %s", got) }
+}
+`,
+    });
+    assert.equal(verdict.accept, true);
+    assert.match(verdict.note || "", /GITHUB_RUN_ID/);
 });
 
 test("assessProbeFailure accepts Go test assertion failure (--- FAIL:) as a behavior failure", () => {

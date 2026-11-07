@@ -422,7 +422,7 @@ export function detectSourceHeuristics(source: string, language: ProjectLanguage
         }
     }
 
-    return alerts;
+    return alerts.map((alert) => `${alert} Report it only when a non-test caller can supply the triggering value.`);
 }
 
 export function auditNote(language: ProjectLanguage, repoPath: string, relPath: string, source: string): string {
@@ -457,7 +457,9 @@ TASK:
 The samples are TypeScript. Find a realistic call that throws, returns the wrong value, or violates a docstring contract/invariant.
 Write the probe beside the target file (src/lib.ts -> src/hunted_probe.test.ts). It is executed with tsx from the repository root.
 - ESM import/export. Import the target with a relative path and NO file extension, for example import { fn } from "./lib".
-- Probe realistic edge values: NaN, Infinity, -0, 0, "", null, undefined, traversal strings ("../../etc/passwd", "foo/../bar"), negative slice indices, empty collections.
+- Do not pass NaN, Infinity, or a length <= 0 yourself. A failure on a value the probe invents is discarded unless a non-test caller passes it, or JSON.parse of a payload the probe supplies produces it. JSON.parse cannot produce NaN or Infinity.
+- A slice or substring panic counts only when a non-test caller passes that length. Positive literals at every call site mean there is no bug.
+- For a sanitizer, call the function that joins the result (path.join) and assert the joined path stays under its prefix. The sanitizer returning the input is not enough.
 - Assertions: import assert from "node:assert/strict"; assert.strictEqual(actual, expected, "BUG: reason") or assert.deepStrictEqual(...).
 - When the bug is an unhandled throw (TypeError, RangeError, unhandled rejection), let it throw without catching. When the bug is a logic or contract bypass, assert the expected result so it fails with an AssertionError on the current code and exits 0 once fixed.
 - Do not use path aliases, vitest, jest, mocha, or a test runner.
@@ -483,7 +485,8 @@ The samples are Go. Find a realistic call that panics, returns the wrong value, 
 Write a unit test in the SAME directory as targetFile, named hunted_probe_test.go.
 - Use the same package clause as the target file, not package foo_test.
 - The test function must be named TestHuntedProbe(t *testing.T).
-- Probe realistic edge values: math.NaN(), math.Inf(1), 0, -1, empty string, path traversal ("../../etc/passwd", "foo/../bar"), nil pointers, empty slices.
+- Do not pass math.NaN(), math.Inf(), or an integer <= 0 yourself. encoding/json rejects NaN and Inf, so assigning math.NaN() to a decoded field is discarded. A slice bounds panic counts only when a non-test caller passes that length.
+- For a sanitizer, call the function that path.Joins the result and assert the joined key stays under its prefix. Asserting that CleanPart returns the input is not enough.
 - When the bug is a panic (slice out-of-bounds, nil map write), let it panic naturally. When the bug is a logic or contract bypass, assert the correct behavior with t.Fatalf("..."). The test must FAIL on the current code and pass once the code is fixed.
 - No network. No extra build tags.
 Files in this round:
@@ -503,7 +506,8 @@ TASK:
 The samples are Rust. Find a realistic call that panics, returns the wrong value, or violates a contract/invariant. Assert the correct result. The test must fail on the current code.
 Write an integration test at the probe path for the crate that contains targetFile. The test function must be named hunted_probe.
 - Call the public API: use <crate_name>::...
-- Probe realistic edge values: f64::NAN, f64::INFINITY, 0, -1, "", traversal strings ("../../etc/passwd"), empty slices &[], None.
+- Do not pass f64::NAN, f64::INFINITY, or a length of 0 yourself. A failure on a value the probe invents is discarded unless a non-test caller passes it. A slice panic counts only when a non-test caller passes that length.
+- For a sanitizer, call the function that joins the path and assert the joined path stays under its prefix.
 - When the bug is a panic (slice bounds out of bounds, unwrap on None, subtraction underflow), let it panic naturally. When the bug is a logic or contract bypass, assert with assert_eq!(actual, expected, "BUG: reason") or panic!("BUG: reason").
 - Do not catch the panic with catch_unwind. The test passes when the bug is absent.
 - No network. Do not edit Cargo.toml.
@@ -655,6 +659,267 @@ export function remoteServiceFailure(trace: string, type?: string, message?: str
 function claimedExceptionTypes(claimedText: string): string[] {
     const found = [...claimedText.matchAll(/\b([A-Za-z_][\w.]*(?:Error|Exception))\b/g)].map((match) => match[1].split(".").pop()!);
     return [...new Set(found)];
+}
+
+export interface ReachabilityVerdict {
+    accept: boolean;
+    /** Ask the hunter to rewrite the probe. Unreachable inputs are not retried. */
+    retry: boolean;
+    reason: string;
+    note?: string;
+}
+
+const CALL_SKIP = new Set([
+    "if", "for", "switch", "return", "make", "new", "len", "cap", "append", "panic", "println", "print",
+    "Fatal", "Fatalf", "Error", "Errorf", "Helper", "Log", "Logf", "Skip", "Run", "Parallel", "Cleanup",
+    "assert", "assert_eq", "assert_ne", "strictEqual", "deepStrictEqual", "equal", "ok", "throws", "fail",
+    "it", "test", "describe", "expect", "require", "string", "int", "float64", "Some", "Ok", "Err",
+]);
+
+const NONFINITE_IN_PROBE = /math\.NaN\s*\(|math\.Inf\s*\(|float\(\s*['"](?:nan|[-+]?inf)['"]\s*\)|Number\.NaN\b|f(?:32|64)::NAN\b|f(?:32|64)::INFINITY\b|(?:[(,]\s*)NaN\s*[,)]|(?:[(,]\s*)Infinity\s*[,)]/;
+const NONFINITE_PRODUCER = /math\.NaN\s*\(|math\.Inf\s*\(|float\(\s*['"](?:nan|[-+]?inf)['"]\s*\)|Number\.NaN\b|f(?:32|64)::NAN\b|strconv\.ParseFloat\s*\(|parseFloat\s*\(|ParseFloat\s*\(/;
+const JOINER = /path\.Join\s*\(|filepath\.Join\s*\(|filepath\.Clean\s*\(|path\.Clean\s*\(|os\.path\.join\s*\(|os\.path\.normpath\s*\(|Path::new\b|uploadObjectKey\s*\(|ObjectName\s*\(/;
+
+function isTestSource(file: string): boolean {
+    const norm = file.split(path.sep).join("/");
+    const base = path.posix.basename(norm);
+    if (base.startsWith("hunted_probe")) return true;
+    if (/_test\.go$/.test(base) || /\.(test|spec)\.tsx?$/.test(base)) return true;
+    if (/^test_.*\.py$/.test(base) || /_test\.py$/.test(base)) return true;
+    if (norm.startsWith("tests/") || norm.includes("/tests/") || norm.includes("/testdata/")) return true;
+    return false;
+}
+
+function definedFunctions(source: string): Set<string> {
+    const names = new Set<string>();
+    const patterns = [
+        /\bfunc\s+(?:\([^)\n]*\)\s*)?([A-Za-z_]\w*)\s*\(/g,
+        /\bfunction\s+([A-Za-z_]\w*)\s*\(/g,
+        /\bdef\s+([A-Za-z_]\w*)\s*\(/g,
+        /\bfn\s+([A-Za-z_]\w*)\s*\(/g,
+    ];
+    for (const pattern of patterns) {
+        for (const match of source.matchAll(pattern)) names.add(match[1]);
+    }
+    return names;
+}
+
+function isDefinition(source: string, index: number): boolean {
+    const before = source.slice(Math.max(0, index - 80), index);
+    // Only the keywords attached to this name. A call later in the same
+    // function must not be skipped because the line started with func.
+    return /(?:\bfunc\s+\([^)\n]*\)\s*|\bfunc\s+|\bfunction\s+|\bfn\s+|\bdef\s+)$/.test(before);
+}
+
+/** Arguments of calls to name, skipping the definition. */
+function callArguments(source: string, name: string): string[][] {
+    const found: string[][] = [];
+    const re = new RegExp(`\\b${name}\\s*\\(`, "g");
+    for (const match of source.matchAll(re)) {
+        const start = match.index ?? 0;
+        if (isDefinition(source, start)) continue;
+        let depth = 1;
+        let quote: string | null = null;
+        let raw = "";
+        for (let i = start + match[0].length; i < source.length && depth > 0; i++) {
+            const c = source[i];
+            if (quote) {
+                raw += c;
+                if (c === "\\") {
+                    raw += source[i + 1] ?? "";
+                    i++;
+                    continue;
+                }
+                if (c === quote) quote = null;
+                continue;
+            }
+            if (c === "\"" || c === "'" || c === "`") {
+                quote = c;
+                raw += c;
+                continue;
+            }
+            if (c === "(") depth++;
+            if (c === ")" ) {
+                depth--;
+                if (depth === 0) break;
+            }
+            raw += c;
+        }
+        found.push(splitArgs(raw));
+    }
+    return found;
+}
+
+function splitArgs(raw: string): string[] {
+    const args: string[] = [];
+    let cur = "";
+    let depth = 0;
+    let quote: string | null = null;
+    for (let i = 0; i < raw.length; i++) {
+        const c = raw[i];
+        if (quote) {
+            cur += c;
+            if (c === "\\") {
+                cur += raw[i + 1] ?? "";
+                i++;
+                continue;
+            }
+            if (c === quote) quote = null;
+            continue;
+        }
+        if (c === "\"" || c === "'" || c === "`") {
+            quote = c;
+            cur += c;
+            continue;
+        }
+        if (c === "(" || c === "{" || c === "[") depth++;
+        else if (c === ")" || c === "}" || c === "]") depth = Math.max(0, depth - 1);
+        else if (c === "," && depth === 0) {
+            args.push(cur.trim());
+            cur = "";
+            continue;
+        }
+        cur += c;
+    }
+    if (cur.trim()) args.push(cur.trim());
+    return args;
+}
+
+function probeCalls(probeSource: string, defined: Set<string>): { name: string; args: string[] }[] {
+    const calls: { name: string; args: string[] }[] = [];
+    for (const name of defined) {
+        if (CALL_SKIP.has(name)) continue;
+        for (const args of callArguments(probeSource, name)) calls.push({ name, args });
+    }
+    return calls;
+}
+
+function productionFiles(repoPath: string, language: ProjectLanguage): { file: string; source: string }[] {
+    const exts = new Set(huntExtensions(language));
+    const out: { file: string; source: string }[] = [];
+    for (const file of listFiles(repoPath)) {
+        const norm = file.split(path.sep).join("/");
+        if (ignoredSource(norm) || isTestSource(norm)) continue;
+        if (!exts.has(path.posix.extname(norm))) continue;
+        const abs = path.join(repoPath, file);
+        let size = 0;
+        try {
+            size = fs.statSync(abs).size;
+        } catch {
+            continue;
+        }
+        if (size > 600_000) continue;
+        try {
+            out.push({ file: norm, source: fs.readFileSync(abs, "utf-8") });
+        } catch {
+            continue;
+        }
+    }
+    return out;
+}
+
+function isPositiveLiteral(arg: string | undefined): boolean {
+    return !!arg && /^[1-9]\d*$/.test(arg.trim());
+}
+
+function probeInjectsNonFinite(probeSource: string): boolean {
+    return NONFINITE_IN_PROBE.test(probeSource);
+}
+
+/**
+ * A probe failure is a bug only when a non-test caller can supply the
+ * triggering value. Assigning NaN, or passing max <= 0 when every caller
+ * passes a positive literal, is the probe.
+ */
+export function assessReachability(input: {
+    repoPath: string;
+    language: ProjectLanguage;
+    probeSource: string;
+    targetFile: string;
+}): ReachabilityVerdict {
+    let targetSource = "";
+    try {
+        targetSource = fs.readFileSync(path.join(input.repoPath, input.targetFile), "utf-8");
+    } catch {
+        return { accept: true, retry: false, reason: "the target file could not be read" };
+    }
+    const defined = definedFunctions(targetSource);
+    const calls = probeCalls(input.probeSource, defined);
+    const files = productionFiles(input.repoPath, input.language);
+    const callersOf = (name: string) => files.filter((file) => callArguments(file.source, name).length > 0);
+
+    if (probeInjectsNonFinite(input.probeSource)) {
+        const names = calls.map((call) => call.name);
+        const relevant = files.filter((file) =>
+            file.file === input.targetFile.split(path.sep).join("/")
+            || names.some((name) => callArguments(file.source, name).length > 0)
+        );
+        const blob = (relevant.length > 0 ? relevant : [{ source: targetSource }]).map((file) => file.source).join("\n");
+        if (!NONFINITE_PRODUCER.test(blob)) {
+            return {
+                accept: false,
+                retry: false,
+                reason: "the probe builds a NaN or Inf value. No non-test caller constructs one, and encoding/json, json.loads, and JSON.parse cannot produce one. A comparison that fails only on a value the probe assigns is not a reachable bug",
+            };
+        }
+    }
+
+    for (const call of calls) {
+        const boundAt = call.args.findIndex((arg) => /^-?\d+$/.test(arg.trim()) && Number(arg.trim()) <= 0);
+        if (boundAt < 0) continue;
+        const sites = callersOf(call.name).flatMap((file) => callArguments(file.source, call.name));
+        const exported = input.language === "go"
+            ? /^[A-Z]/.test(call.name)
+            : input.language === "python"
+                ? !call.name.startsWith("_")
+                : input.language === "rust"
+                    ? new RegExp(`\\bpub\\s+fn\\s+${call.name}\\s*\\(`).test(targetSource)
+                    : new RegExp(`\\bexport\\s+(?:async\\s+)?(?:function|const|let)\\s+${call.name}\\b`).test(targetSource);
+        if (sites.length === 0) {
+            if (!exported) {
+                return {
+                    accept: false,
+                    retry: false,
+                    reason: `${call.name} is only called from the probe with ${call.args[boundAt]}. No non-test caller passes that length`,
+                };
+            }
+            continue;
+        }
+        const safe = sites.every((args) => isPositiveLiteral(args[boundAt]));
+        if (safe) {
+            return {
+                accept: false,
+                retry: false,
+                reason: `every non-test call of ${call.name} passes a positive literal. The probe is the only caller that passes ${call.args[boundAt]}, so the panic is not reachable`,
+            };
+        }
+    }
+
+    const traversal = calls.find((call) => call.args.some((arg) => arg.includes("../") || arg.includes("..\\")));
+    if (traversal && !JOINER.test(input.probeSource) && !JOINER.test(targetSource)) {
+        const joined = callersOf(traversal.name).some((file) => JOINER.test(file.source));
+        if (joined) {
+            return {
+                accept: false,
+                retry: true,
+                reason: `${traversal.name} receives a traversal string, and a caller joins that result into a path. Assert on the joined key, not only on ${traversal.name}. The joined key has to stay under its prefix`,
+            };
+        }
+        return {
+            accept: false,
+            retry: false,
+            reason: `${traversal.name} returns a traversal string, but no caller joins that result into a path. The string is not a prefix escape`,
+        };
+    }
+
+    let note: string | undefined;
+    if (traversal) {
+        const blob = files.map((file) => file.source).join("\n");
+        if (/GITHUB_RUN_ID|GITHUB_JOB|GITHUB_RUN_ATTEMPT/.test(blob)) {
+            note = "Some ids in this repo come from GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, and GITHUB_JOB, which cannot contain a slash. The finding holds for callers that read a free-form id.";
+        }
+    }
+    return { accept: true, retry: false, reason: "a non-test caller can supply the triggering value", note };
 }
 
 /**
